@@ -82,6 +82,14 @@ describe('legacy production route regression', () => {
     } } });
     expect(hasCompleteResponse(bothRoles.questionVOList[0], bothRoles.questionAnswerItemVOList![0].userAnswer)).toBe(true);
   });
+  it('plans oral-brief type 8 as recording instead of writing', () => {
+    const exercise8 = { id: 'oral-8', type: 8, contentString: 'Talk about your favorite sport.', answer: '' };
+    const d = legacyData({ exercise: exercise8, submitNum: 0 });
+    expect(planTasks(d)[0].kind).toBe('recording');
+    expect(planTasks(d)[0].question.type).toBe('legacy_8');
+    expect(hasCompleteResponse(planTasks(d)[0].question, { audio: 'vod-id' })).toBe(true);
+    expect(hasCompleteResponse(planTasks(d)[0].question, { audio: '' })).toBe(false);
+  });
   it('plans legacy_18 and requires the selected role answers', () => {
     const exercise18 = { id: 'role-18', type: 18,
       roles: [{ id: 'role-1', name: 'Adrian' }, { id: 'role-2', name: 'Kris' }],
@@ -307,14 +315,14 @@ describe('legacy production route regression', () => {
     document.body.innerHTML = '<app-course-task-stu><lib-writing-sample><textarea></textarea></lib-writing-sample><button>Submit</button></app-course-task-stu>';
     const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
     const host = root.firstElementChild as HTMLElement;
-    const exercise8: any = { id: 'ai-q', type: 8, contentString: 'Write a short answer.', audio: 'audio-res' };
+    const exercise8: any = { id: 'ai-q', type: 7, contentString: 'Write a short answer.', audio: 'audio-res' };
     const changes = vi.fn();
     const getResUrl = vi.fn((id: string) => ({ subscribe: ({ next }: any) => {
       next({ url: `https://cdn.example/${id}.mp3` }); return { unsubscribe: vi.fn() };
     } }));
     const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
       exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise8, pageTitle: 'AI listening',
-      doRecord: { type: 8, answer: '' }, loadDoRecord() {}, doRecordChange: { emit: changes },
+      doRecord: { type: 7, answer: '' }, loadDoRecord() {}, doRecordChange: { emit: changes },
       getWebUrlService: { getResUrl } };
     const textarea = host.querySelector('textarea')!;
     textarea.addEventListener('input', () => { c.doRecord.answer = textarea.value; });
@@ -332,6 +340,34 @@ describe('legacy production route regression', () => {
     expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('listening transcript'), settings, expect.anything());
     expect(textarea.value).toBe('AI generated answer');
     expect(c.doRecord.answer).toBe('AI generated answer');
+  });
+  it('generates an AI oral answer, uploads its TTS audio, and writes the VOD answer', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-oral-brief-exercise-cs-study></lib-oral-brief-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const exercise8: any = { id: 'oral-8', type: 8, contentString: 'Talk about your favorite sport.', answer: '' };
+    const changes = vi.fn();
+    const upload = {
+      onVodComplete: { subscribe: (cb: (value: unknown) => void) => { setTimeout(() => cb({ id: 'vod-audio-id' }), 0); return { unsubscribe: vi.fn() }; } },
+      onVodError: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+      vodStartUpload: vi.fn(),
+    };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise8, pageTitle: 'Oral brief',
+      doRecord: { type: 8, answer: '' }, loadDoRecord() {}, doRecordChange: { emit: changes },
+      dataChange() { changes(this.doRecord); }, vodUploadService: upload };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise: exercise8, submitNum: 0, doRecord: c.doRecord }))[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ answer: 'My favorite sport is running because it keeps me healthy.' });
+    vi.mocked(synthesizeSpeech).mockResolvedValue(new ArrayBuffer(8));
+    const settings = { ...defaults, aiAnswers: true, aiApiKey: 'ai-key', ttsApiKey: 'tts-key' };
+    const value = await adapter.record(unit, task, settings, signal());
+    expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('favorite sport'), settings, expect.anything());
+    expect(synthesizeSpeech).toHaveBeenCalledTimes(1);
+    expect(upload.vodStartUpload).toHaveBeenCalledTimes(1);
+    expect(c.doRecord.answer).toBe('vod-audio-id'); expect(c.doRecord.ossOrVod).toBe(2);
+    expect(value).toEqual({ audio: 'vod-audio-id' });
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());
@@ -379,6 +415,12 @@ describe('legacy production route regression', () => {
       await controller.start(f.unit, defaults);
       expect(controller.progress.status).toBe('paused'); expect(f.submit).not.toHaveBeenCalled();
     }
+  });
+  it('pauses continuous next on a failed goal challenge instead of hanging', async () => {
+    const f = fixture();
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="ant-modal-wrap" style="display:block;visibility:visible"><div class="ant-modal">闯关失败！本次成绩：55分</div></div>');
+    await expect(f.adapter.next(f.unit, signal())).rejects.toThrow('目标闯关未通过');
   });
   it('refuses a closed course and stale exercise blocks', () => {
     const f = fixture(); f.c.status = 0;

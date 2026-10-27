@@ -30,7 +30,7 @@ export function taskFor(q: Question, record?: AnswerRecord, allowMissing = false
   const raw = q.answer !== '' && q.answer != null ? q.answer : record?.answer;
   const answer = parse(raw);
   const extension = parse(q.extension);
-  if (['oral_simple_speak', 'oral_follow_along', 'oral_vocabulary_learning', 'legacy_9', 'legacy_18'].includes(q.type)) {
+  if (['oral_simple_speak', 'oral_follow_along', 'oral_vocabulary_learning', 'legacy_8', 'legacy_9', 'legacy_18'].includes(q.type)) {
     return { question: q, kind: 'recording' };
   }
   if (['choice_single', 'choice_multiple', 'judge_basic'].includes(q.type)) {
@@ -126,7 +126,7 @@ export function canonical(q: Question, value: unknown): unknown {
   if (q.type === 'fill_base') return Array.isArray(v) ? v.map(object)
     .map(a => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
   if (q.type.startsWith('essay_')) return { answer: String(object(v).answer ?? '').replace(/\r\n/g, '\n').trim() };
-  if (q.type === 'oral_simple_speak') return { audio: audioId(object(v).audio) };
+  if (q.type === 'oral_simple_speak' || q.type === 'legacy_8') return { audio: audioId(object(v).audio) };
   if (q.type === 'legacy_9') return Array.isArray(v) ? v.map(object).map(a => ({ idx: a.idx, audio: audioId(String(a.audio || '')) }))
     .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
   if (q.type === 'legacy_18') {
@@ -151,7 +151,7 @@ export function hasCompleteResponse(q: Question, value: unknown): boolean {
       selected.every(s => typeof s === 'string' && options.includes(s));
   }
   if (q.type.startsWith('essay_')) return typeof object(v).answer === 'string' && !!String(object(v).answer).trim();
-  if (q.type === 'oral_simple_speak') return typeof object(v).audio === 'string' && !!object(v).audio;
+  if (q.type === 'oral_simple_speak' || q.type === 'legacy_8') return typeof object(v).audio === 'string' && !!object(v).audio;
   if (q.type === 'legacy_9') {
     const items = object(q.extension).sentItems;
     if (!Array.isArray(items) || !items.length || !Array.isArray(v) || !v.length) return false;

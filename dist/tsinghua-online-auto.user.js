@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.0
-// @description  日常练习连续答题、AI/ASR/TTS 可配置接口、原题音频 Chivox 评测、legacy_18 TTS、unsafeWindow 桥接
+// @version      0.3.1
+// @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
 // @run-at       document-start
@@ -134,7 +134,7 @@
     const raw = q.answer !== "" && q.answer != null ? q.answer : record?.answer;
     const answer = parse(raw);
     const extension = parse(q.extension);
-    if (["oral_simple_speak", "oral_follow_along", "oral_vocabulary_learning", "legacy_9", "legacy_18"].includes(q.type)) {
+    if (["oral_simple_speak", "oral_follow_along", "oral_vocabulary_learning", "legacy_8", "legacy_9", "legacy_18"].includes(q.type)) {
       return { question: q, kind: "recording" };
     }
     if (["choice_single", "choice_multiple", "judge_basic"].includes(q.type)) {
@@ -222,7 +222,7 @@
     if (q.type === "choice_multiple") return Array.isArray(v) ? [...v].sort() : v;
     if (q.type === "fill_base") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type.startsWith("essay_")) return { answer: String(object(v).answer ?? "").replace(/\r\n/g, "\n").trim() };
-    if (q.type === "oral_simple_speak") return { audio: audioId(object(v).audio) };
+    if (q.type === "oral_simple_speak" || q.type === "legacy_8") return { audio: audioId(object(v).audio) };
     if (q.type === "legacy_9") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, audio: audioId(String(a.audio || "")) })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type === "legacy_18") {
       const r = object(v);
@@ -239,7 +239,7 @@
       return Array.isArray(selected) && selected.length > 0 && new Set(selected).size === selected.length && selected.every((s) => typeof s === "string" && options.includes(s));
     }
     if (q.type.startsWith("essay_")) return typeof object(v).answer === "string" && !!String(object(v).answer).trim();
-    if (q.type === "oral_simple_speak") return typeof object(v).audio === "string" && !!object(v).audio;
+    if (q.type === "oral_simple_speak" || q.type === "legacy_8") return typeof object(v).audio === "string" && !!object(v).audio;
     if (q.type === "legacy_9") {
       const items = object(q.extension).sentItems;
       if (!Array.isArray(items) || !items.length || !Array.isArray(v) || !v.length) return false;
@@ -950,8 +950,11 @@
           throw new Halt("NO_ANSWER", "拖拽填空的答案缺失或无法唯一匹配选项");
         }
       }
-    } else if ([6, 7, 8].includes(type)) {
+    } else if ([6, 7].includes(type)) {
       q.type = "essay_questions_answers";
+      q.answer = text(e.answer);
+    } else if (type === 8) {
+      q.type = "legacy_8";
       q.answer = text(e.answer);
     } else if (type === 9 || type === 18) {
       q.type = type === 9 ? "legacy_9" : "legacy_18";
@@ -1047,7 +1050,7 @@
       answer: object(q.extension).legacyType === 24 ? object(v).choiceId : object(v).content
     }));
     if (q.type.startsWith("essay_")) return { answer: a, annex: [] };
-    if (q.type === "oral_simple_speak") return { audio: typeof a === "string" ? a : "" };
+    if (q.type === "oral_simple_speak" || q.type === "legacy_8") return { audio: typeof a === "string" ? a : "" };
     if (q.type === "legacy_9") {
       const answers = object(a);
       return Object.entries(answers).map(([idx, value]) => ({ idx, audio: object(value).recordAudio || "" }));
@@ -1241,7 +1244,8 @@
     }
     async record(unit, task, settings, signal) {
       const { component: c, root } = this.leaf(unit, task);
-      if (![9, 18, 20].includes(Number(c.exercise.type))) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
+      if (![8, 9, 18, 20].includes(Number(c.exercise.type))) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
+      if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c);
       if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
       if (Number(c.exercise.type) === 18) return this.recordRolePlayTts(unit, task, settings, signal, c);
       if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
@@ -1282,6 +1286,61 @@
           c.recorder.reset();
           c.isStart = false;
         }
+      }
+    }
+    async recordOralBrief(unit, task, settings, signal, c) {
+      const q = task.question;
+      let answer = typeof q.answer === "string" ? q.answer.trim() : "";
+      if (settings.aiAnswers) {
+        if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "口语简答题需要 AI 生成回答，请填写 AI API Key");
+        const transcript = q.audio?.length && settings.asrApiKey.trim() ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : "";
+        const prompt = `你是英语口语考试助手。请根据题目写一个自然、简洁、适合朗读的英语回答，2-4 句。只返回 JSON：{"answer":"..."}。
+题目: ${q.instruction || q.stem || ""}
+页面文本:
+${(q.stem || "").slice(0, 3e3)}
+听力转写: ${transcript || "（无）"}`;
+        const result = object(await answerWithAi(prompt, settings, signal));
+        answer = typeof result.answer === "string" ? result.answer.trim() : "";
+        if (!answer) throw new Halt("AI_ANSWER", "AI 没有返回口语简答题答案");
+      }
+      if (!answer) throw new Halt("NO_ANSWER", "口语简答题没有页面答案；请启用 AI 答题或手动填写");
+      const audio = await synthesizeSpeech(answer, settings, signal);
+      const id2 = await this.uploadOralAudio(c, audio, settings, signal);
+      this.run(unit, () => {
+        c.doRecord.answer = id2;
+        c.doRecord.ossOrVod = 2;
+        if (typeof c.dataChange === "function") c.dataChange();
+        else c.doRecordChange.emit(c.doRecord);
+      });
+      await sleep(80, signal);
+      this.editable(unit);
+      return legacyValue(task.question, c.doRecord);
+    }
+    async uploadOralAudio(c, audio, settings, signal) {
+      const upload = c.vodUploadService;
+      if (typeof upload?.vodStartUpload !== "function" || typeof upload?.onVodComplete?.subscribe !== "function" || typeof upload?.onVodError?.subscribe !== "function") {
+        throw new Halt("ORAL_DOM", "原站 VOD 上传服务尚未初始化，请刷新页面后重试");
+      }
+      let completeSub, errorSub;
+      try {
+        return await bounded(new Promise((resolve, reject) => {
+          completeSub = upload.onVodComplete.subscribe((result) => {
+            const id2 = object(result).id;
+            if (typeof id2 === "string" && id2) resolve(id2);
+            else reject(new Halt("UPLOAD_FAILED", "VOD 上传完成但没有返回音频 ID"));
+          });
+          errorSub = upload.onVodError.subscribe((error) => {
+            const message = typeof error === "string" ? error : String(object(error).message || "");
+            reject(new Halt("UPLOAD_FAILED", `VOD 上传失败${message ? `：${message.slice(0, 160)}` : ""}`));
+          });
+          upload.vodStartUpload({
+            name: `thoa-${Date.now()}.mp3`,
+            blob: new Blob([audio], { type: "audio/mpeg" })
+          }, true);
+        }), Math.max(6e4, settings.timeoutMs), signal);
+      } finally {
+        completeSub?.unsubscribe();
+        errorSub?.unsubscribe();
       }
     }
     async recordRolePlay(unit, task, settings, signal, c, root) {
@@ -1637,14 +1696,33 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
       if (buttons.length !== 1) throw new Halt("SUBMIT_CONTROL", "无法唯一识别旧版 Submit 按钮，已暂停");
       buttons[0].click();
     }
+    challengeModal() {
+      const modal = [...document.querySelectorAll(".ant-modal-wrap")].find((el) => shown(el) && /闯关|Rechallenge|Review/.test(el.innerText || el.textContent || ""));
+      return modal ? { modal, text: modal.innerText || modal.textContent || "" } : null;
+    }
+    goalFailure() {
+      const found = this.challengeModal();
+      if (!found || !/闯关失败/.test(found.text)) return null;
+      const score = /本次成绩[:：]\s*(\d+)\s*分/.exec(found.text)?.[1];
+      return `目标闯关未通过${score ? `（${score}分）` : ""}，请手动 Rechallenge 或调整答案后重试`;
+    }
     async next(unit, signal) {
       check(signal);
       this.assertContext(unit);
+      const failed = this.goalFailure();
+      if (failed) throw new Halt("GOAL_FAILED", failed);
+      const successModal = this.challengeModal();
+      if (successModal && /闯关成功/.test(successModal.text)) {
+        successModal.modal.querySelector(".ant-modal-close")?.click();
+        await sleep(300, signal);
+      }
       const right = [...document.querySelectorAll(".page-next")].find((el) => !!el.querySelector('img[src*="tx_page_right"]') && shown(el));
       if (!right || right.getAttribute("aria-disabled") === "true" || right.classList.contains("disabled")) return void 0;
       const oldKey = unit.key;
       right.click();
       await until(() => {
+        const failure2 = this.goalFailure();
+        if (failure2) throw new Halt("GOAL_FAILED", failure2);
         const found = this.discover()[0];
         return found && found.key !== oldKey ? found : void 0;
       }, 2e4, signal);
@@ -2020,7 +2098,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.0";
+      this.el("version").textContent = false ? "dev" : "0.3.1";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -2213,7 +2291,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.0",
+        version: false ? "dev" : "0.3.1",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

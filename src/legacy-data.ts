@@ -26,8 +26,10 @@ export function legacyQuestion(exercise: unknown): Question {
         throw new Halt('NO_ANSWER', '拖拽填空的答案缺失或无法唯一匹配选项');
       }
     }
-  } else if ([6, 7, 8].includes(type)) {
+  } else if ([6, 7].includes(type)) {
     q.type = 'essay_questions_answers'; q.answer = text(e.answer);
+  } else if (type === 8) {
+    q.type = 'legacy_8'; q.answer = text(e.answer);
   } else if (type === 9 || type === 18) {
     q.type = type === 9 ? 'legacy_9' : 'legacy_18';
     const roles = arrayField(e, 'roles', 'roleList');
@@ -117,7 +119,7 @@ export function legacyValue(q: Question, record: unknown): unknown {
   if (q.type === 'fill_base') return Object.entries(object(a)).map(([idx, v]) => ({ idx,
     answer: object(q.extension).legacyType === 24 ? object(v).choiceId : object(v).content }));
   if (q.type.startsWith('essay_')) return { answer: a, annex: [] };
-  if (q.type === 'oral_simple_speak') return { audio: typeof a === 'string' ? a : '' };
+  if (q.type === 'oral_simple_speak' || q.type === 'legacy_8') return { audio: typeof a === 'string' ? a : '' };
   if (q.type === 'legacy_9') {
     const answers = object(a);
     return Object.entries(answers).map(([idx, value]) => ({ idx, audio: object(value).recordAudio || '' }));

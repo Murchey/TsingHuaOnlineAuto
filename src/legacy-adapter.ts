@@ -167,7 +167,8 @@ export class LegacyAdapter implements Adapter {
   }
   async record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown> {
     const { component: c, root } = this.leaf(unit, task);
-    if (![9, 18, 20].includes(Number(c.exercise.type))) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
+    if (![8, 9, 18, 20].includes(Number(c.exercise.type))) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
+    if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c);
     if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
     if (Number(c.exercise.type) === 18) return this.recordRolePlayTts(unit, task, settings, signal, c);
     if (!navigator.mediaDevices?.getUserMedia) throw new Halt('MICROPHONE', '浏览器未提供麦克风');
@@ -197,6 +198,61 @@ export class LegacyAdapter implements Adapter {
       return legacyValue(task.question, c.doRecord);
     } finally {
       if (c.recorder?.state === 'recording') { clearTimeout(c.timer); c.recorder.reset(); c.isStart = false; }
+    }
+  }
+  private async recordOralBrief(unit: Unit, task: Task, settings: Settings, signal: AbortSignal,
+    c: LegacyComponent): Promise<unknown> {
+    const q = task.question;
+    let answer = typeof q.answer === 'string' ? q.answer.trim() : '';
+    if (settings.aiAnswers) {
+      if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '口语简答题需要 AI 生成回答，请填写 AI API Key');
+      const transcript = q.audio?.length && settings.asrApiKey.trim() ?
+        await this.transcribeQuestionAudio(c, q.audio, settings, signal) : '';
+      const prompt = `你是英语口语考试助手。请根据题目写一个自然、简洁、适合朗读的英语回答，2-4 句。只返回 JSON：{"answer":"..."}。
+题目: ${q.instruction || q.stem || ''}
+页面文本:
+${(q.stem || '').slice(0, 3000)}
+听力转写: ${transcript || '（无）'}`;
+      const result = object(await answerWithAi(prompt, settings, signal));
+      answer = typeof result.answer === 'string' ? result.answer.trim() : '';
+      if (!answer) throw new Halt('AI_ANSWER', 'AI 没有返回口语简答题答案');
+    }
+    if (!answer) throw new Halt('NO_ANSWER', '口语简答题没有页面答案；请启用 AI 答题或手动填写');
+    const audio = await synthesizeSpeech(answer, settings, signal);
+    const id = await this.uploadOralAudio(c, audio, settings, signal);
+    this.run(unit, () => {
+      c.doRecord.answer = id;
+      c.doRecord.ossOrVod = 2;
+      if (typeof c.dataChange === 'function') c.dataChange();
+      else c.doRecordChange.emit(c.doRecord);
+    });
+    await sleep(80, signal); this.editable(unit);
+    return legacyValue(task.question, c.doRecord);
+  }
+  private async uploadOralAudio(c: LegacyComponent, audio: ArrayBuffer, settings: Settings,
+    signal: AbortSignal): Promise<string> {
+    const upload = c.vodUploadService;
+    if (typeof upload?.vodStartUpload !== 'function' || typeof upload?.onVodComplete?.subscribe !== 'function' ||
+        typeof upload?.onVodError?.subscribe !== 'function') {
+      throw new Halt('ORAL_DOM', '原站 VOD 上传服务尚未初始化，请刷新页面后重试');
+    }
+    let completeSub: { unsubscribe(): void } | undefined, errorSub: { unsubscribe(): void } | undefined;
+    try {
+      return await bounded(new Promise<string>((resolve, reject) => {
+        completeSub = upload.onVodComplete.subscribe((result: unknown) => {
+          const id = object(result).id;
+          if (typeof id === 'string' && id) resolve(id);
+          else reject(new Halt('UPLOAD_FAILED', 'VOD 上传完成但没有返回音频 ID'));
+        });
+        errorSub = upload.onVodError.subscribe((error: unknown) => {
+          const message = typeof error === 'string' ? error : String(object(error).message || '');
+          reject(new Halt('UPLOAD_FAILED', `VOD 上传失败${message ? `：${message.slice(0, 160)}` : ''}`));
+        });
+        upload.vodStartUpload({ name: `thoa-${Date.now()}.mp3`,
+          blob: new Blob([audio], { type: 'audio/mpeg' }) }, true);
+      }), Math.max(60_000, settings.timeoutMs), signal);
+    } finally {
+      completeSub?.unsubscribe(); errorSub?.unsubscribe();
     }
   }
   private async recordRolePlay(unit: Unit, task: Task, settings: Settings, signal: AbortSignal,
@@ -567,14 +623,34 @@ ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填�
     if (buttons.length !== 1) throw new Halt('SUBMIT_CONTROL', '无法唯一识别旧版 Submit 按钮，已暂停');
     buttons[0].click();
   }
+  private challengeModal(): { modal: HTMLElement; text: string } | null {
+    const modal = [...document.querySelectorAll<HTMLElement>('.ant-modal-wrap')]
+      .find(el => shown(el) && /闯关|Rechallenge|Review/.test(el.innerText || el.textContent || ''));
+    return modal ? { modal, text: modal.innerText || modal.textContent || '' } : null;
+  }
+  private goalFailure(): string | null {
+    const found = this.challengeModal();
+    if (!found || !/闯关失败/.test(found.text)) return null;
+    const score = /本次成绩[:：]\s*(\d+)\s*分/.exec(found.text)?.[1];
+    return `目标闯关未通过${score ? `（${score}分）` : ''}，请手动 Rechallenge 或调整答案后重试`;
+  }
   async next(unit: Unit, signal: AbortSignal): Promise<Unit | undefined> {
     check(signal); this.assertContext(unit);
+    const failed = this.goalFailure();
+    if (failed) throw new Halt('GOAL_FAILED', failed);
+    const successModal = this.challengeModal();
+    if (successModal && /闯关成功/.test(successModal.text)) {
+      successModal.modal.querySelector<HTMLElement>('.ant-modal-close')?.click();
+      await sleep(300, signal);
+    }
     const right = [...document.querySelectorAll<HTMLElement>('.page-next')].find(el =>
       !!el.querySelector('img[src*="tx_page_right"]') && shown(el));
     if (!right || right.getAttribute('aria-disabled') === 'true' || right.classList.contains('disabled')) return undefined;
     const oldKey = unit.key;
     right.click();
     await until(() => {
+      const failure = this.goalFailure();
+      if (failure) throw new Halt('GOAL_FAILED', failure);
       const found = this.discover()[0];
       return found && found.key !== oldKey ? found : undefined;
     }, 20_000, signal);

@@ -26,6 +26,8 @@
 
 0.3.0 的 API 设置不再绑定 MiMo：AI Chat 与 ASR 使用独立 OpenAI 兼容 Base/Key/Model；TTS 提供 MiMo 和 OpenAI `/audio/speech` 两种提供方，默认 MiMo。听力题从练习数据提取 `audio/audios/audioList/listenAudio` 等资源，经 `getResUrl` 下载后调用 ASR `/audio/transcriptions`，转写文本与页面文本、选项、空位一起交给 AI。AI 答题启用时允许页面答案缺失，由 AI 生成后仍走原有控件与提交核对。连续答题是独立设置，开启后每块完成调用原站下一页/下一题。
 
+type 8 实际为 `LIB-ORAL-BRIEF-EXERCISE-CS-STUDY` 口语简答，不是 textarea 写作。其 `doRecord.answer` 是 VOD 音频 ID，`ossOrVod=2`。0.3.1 使用 AI 生成 2-4 句英语回答，TTS 合成 MP3，再调用原站 `vodUploadService.vodStartUpload({name, blob}, true)`，通过 `onVodComplete` 取 ID 并写回 `doRecord`。页面结果出现“闯关失败”弹窗时，`next()` 抛出 `GOAL_FAILED` 并暂停，避免右箭头被弹窗吞掉后卡住；自动 Rechallenge 尚未启用。
+
 ## 新版 Vue
 
 公开首页及其第一方资源：`/assets/textbook-reader-BwTC3IPT.js`、`/assets/src-CRr8PyXj.js`、`/assets/router-l05bPN5G.js`、`/assets/runtime-core.esm-bundler-DDWTrPxX.js`。文件名可能变化。

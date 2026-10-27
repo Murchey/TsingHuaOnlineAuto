@@ -757,7 +757,7 @@
   }
   function gmRequest(options, timeout, signal) {
     const gm = globalThis.GM_xmlhttpRequest;
-    if (typeof gm !== "function") return Promise.reject(new Halt("API_GM", "当前脚本管理器没有提供 GM_xmlhttpRequest"));
+    if (typeof gm !== "function") throw new Halt("API_GM", "当前脚本管理器没有提供 GM_xmlhttpRequest");
     return new Promise((resolve, reject) => {
       if (signal.aborted) {
         reject(new Halt("CANCELLED", "操作已暂停或停止"));
@@ -2242,8 +2242,14 @@ ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个
       this.listeners.add(fn);
       return () => this.listeners.delete(fn);
     }
+    // A disposed or broken panel must never turn a worked run into an unhandled rejection.
     emit() {
-      this.listeners.forEach((fn) => fn());
+      this.listeners.forEach((fn) => {
+        try {
+          fn();
+        } catch {
+        }
+      });
     }
     update(value) {
       Object.assign(this.progress, value);
@@ -2679,6 +2685,7 @@ ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个
       return "正在等待练习组件。请展开含习题的章节，或点击重新检测。";
     }
     render(message = true) {
+      if (this.disposed) return;
       const p = this.controller.progress, busy = this.controller.busy;
       this.el("status").textContent = `${labels[p.status]}${p.phase ? " · " + p.phase : ""}`;
       if (message) this.el("message").textContent = p.message;

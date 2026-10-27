@@ -41,7 +41,8 @@ export class Controller {
   constructor(public adapter: Adapter, public store: Store, private withLock: WithLock = browserLock,
     private reload: () => void = () => location.reload()) {}
   subscribe(fn: () => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
-  private emit(): void { this.listeners.forEach(fn => fn()); }
+  // A disposed or broken panel must never turn a worked run into an unhandled rejection.
+  private emit(): void { this.listeners.forEach(fn => { try { fn(); } catch { /* UI only */ } }); }
   private update(value: Partial<Progress>): void { Object.assign(this.progress, value); this.emit(); }
   report(code: string, message: string, error = false): void {
     this.logs.push({ time: new Date().toISOString(), level: error ? 'error' : 'info', code, message });

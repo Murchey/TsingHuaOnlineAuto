@@ -59,6 +59,13 @@ it('uses MiMo chat-completions ASR with an input_audio part', async () => {
   expect(body.model).toBe('mimo-v2.5-asr');
   expect(body.messages[0].content[0]).toMatchObject({ type: 'input_audio', input_audio: { format: 'mp3', data: 'AQID' } });
 });
+it('falls back to fetch when the userscript manager lacks GM_xmlhttpRequest', async () => {
+  const fetchMock = vi.fn(async () => ({ ok: true, status: 200,
+    text: async () => JSON.stringify({ choices: [{ message: { content: '{"answer":"x"}' } }] }) }));
+  vi.stubGlobal('fetch', fetchMock);
+  await expect(answerWithAi('q', cfg({ aiApiKey: 'k' }), signal())).resolves.toEqual({ answer: 'x' });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
 it('times out a hung userscript-manager request instead of freezing', async () => {
   vi.useFakeTimers();
   const abort = vi.fn();

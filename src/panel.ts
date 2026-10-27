@@ -217,6 +217,7 @@ export class Panel {
     return '正在等待练习组件。请展开含习题的章节，或点击重新检测。';
   }
   private render(message = true): void {
+    if (this.disposed) return;
     const p = this.controller.progress, busy = this.controller.busy;
     this.el('status').textContent = `${labels[p.status]}${p.phase ? ' · ' + p.phase : ''}`;
     if (message) this.el('message').textContent = p.message;

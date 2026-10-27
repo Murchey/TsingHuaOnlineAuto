@@ -137,6 +137,13 @@ describe('practice execution and recovery', () => {
     expect(c.progress.status).toBe('stopped'); expect(store.read(f.unit.key)?.phase).toBe('pending');
     await c.start(f.unit, settings); expect(f.adapter.submit).toHaveBeenCalledOnce();
   });
+  it('survives a panel listener that throws while rendering', async () => {
+    const f = fakeAdapter(data(choice));
+    const c = new Controller(f.adapter, new Store(), lock);
+    c.subscribe(() => { throw new Error('panel disposed'); });
+    await c.start(f.unit, settings);
+    expect(c.progress.status).toBe('done');
+  });
   it('pauses between questions without advancing to submit', async () => {
     const f = fakeAdapter(data(choice, fill)), c = new Controller(f.adapter, new Store(), lock);
     vi.mocked(f.adapter.fill).mockImplementation(async () => { c.pause(); return 'b'; });

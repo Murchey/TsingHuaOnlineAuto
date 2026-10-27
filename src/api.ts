@@ -32,7 +32,9 @@ function failure(status: number, text: string): Halt {
 
 function gmRequest(options: RequestOptions, timeout: number, signal: AbortSignal): Promise<GmResponse> {
   const gm = (globalThis as unknown as { GM_xmlhttpRequest?: GmRequest }).GM_xmlhttpRequest;
-  if (typeof gm !== 'function') return Promise.reject(new Halt('API_GM', '当前脚本管理器没有提供 GM_xmlhttpRequest'));
+  // Throw synchronously: creating a rejected promise outside the Angular zone would be
+  // reported as an unhandled rejection even though request() falls back to fetch.
+  if (typeof gm !== 'function') throw new Halt('API_GM', '当前脚本管理器没有提供 GM_xmlhttpRequest');
   return new Promise<GmResponse>((resolve, reject) => {
     if (signal.aborted) { reject(new Halt('CANCELLED', '操作已暂停或停止')); return; }
     let settled = false, request: { abort?: () => void } | undefined, timer: ReturnType<typeof setTimeout> | undefined;

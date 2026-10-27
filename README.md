@@ -53,7 +53,7 @@ npm ci
 npm run check
 ```
 
-`check` 执行类型检查、构建和测试，安装产物在 `dist/`。源码、测试及适配记录分别在 `src/`、`tests/`、`docs/`。`scripts/browser-console.ps1` 仅用于开发时通过 Windows UI Automation 操作已打开 DevTools 的指定浏览器窗口，必须传入主进程 `BrowserProcessId`；它不会启动浏览器。
+`check` 执行类型检查、构建和测试，安装产物在 `dist/`。源码、测试及适配记录分别在 `src/`、`tests/`、`docs/`。`scripts/browser-console.ps1` 仅用于开发时通过 Windows UI Automation 操作已打开 DevTools 的指定浏览器窗口，必须传入主进程 `BrowserProcessId`；它不会启动浏览器。`scripts/browser-console-bg.ps1` 使用 ValuePattern + PostMessage 在后台执行 DevTools 命令，不激活窗口、不抢焦点。
 
 不保存密码、登录令牌或录音到仓库，不主动上传诊断，不依赖外部 CDN。`src/api.ts` 提供通用 AI Chat、ASR `/audio/transcriptions`、MiMo TTS 和 OpenAI 兼容 TTS 请求；API Key 只存当前标签页 `sessionStorage`。脚本申请 `GM_xmlhttpRequest`、`unsafeWindow` 和 `@connect *`，旧版 Angular 桥接通过页面 window 访问 webpack/ng。诊断不含题干、选项、答案、音频、Cookie、API Key 或 URL 查询参数；旧版路径中的账号段已脱敏。完整课程响应和公开站点资源仅保存在忽略的 `.cache/`，不交付。
 

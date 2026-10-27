@@ -29,6 +29,15 @@ describe('practice execution and recovery', () => {
     expect(f.adapter.next).toHaveBeenCalledTimes(2);
     expect(c.progress.unitsDone).toBe(2);
   });
+  it('stops after the selected unit when continuous answering is disabled', async () => {
+    const f = fakeAdapter(data(choice));
+    const second = { ...f.unit, key: f.unit.key + ':next', contentId: '31', title: '下一题' };
+    f.adapter.next = vi.fn(async () => second);
+    const c = new Controller(f.adapter, new Store(), lock);
+    await c.start(f.unit, { ...settings, continuous: false });
+    expect(c.progress.status).toBe('done'); expect(c.progress.unitsDone).toBe(1);
+    expect(f.adapter.next).not.toHaveBeenCalled();
+  });
   it('preflights every question before changing any answer', async () => {
     const f = fakeAdapter(data(choice, { ...writing, answer: '' })), c = new Controller(f.adapter, new Store(), lock);
     await c.start(f.unit, settings);

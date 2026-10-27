@@ -60,13 +60,20 @@
 - 旧版题目数据增加 `audio` 收集；启用 AI 答题时，若题目有音频则先调用 ASR `/audio/transcriptions`，ASR 转写与页面文本、选项、空位一起交给 AI。AI 答题启用时允许页面答案缺失，由 AI 生成后继续走原控件和提交核对。
 - 连续答题由独立 `continuous` 设置控制；开启时每块完成调用原站下一页/下一题，关闭时只处理当前选择。默认开启以保留旧行为。
 - `legacy_18` 现在先 `selectRole`，再调用原站 `start()` 完成倒计时和所选角色答案初始化；启动期间临时屏蔽 `changeAudioUrl()` 自动麦克风录音，随后才做 TTS→Chivox，避免未启动就灌音导致提交失败。
-- 自动化测试 76 项通过；AI/ASR/TTS 使用模拟请求和模拟评分，未调用真实第三方 API。
+- 自动化测试 77 项通过；AI/ASR/TTS 使用模拟请求和模拟评分，未调用真实第三方 API。
+
+### 0.3.0 后台实测
+
+- 使用新加的 `scripts/browser-console-bg.ps1`，通过 UI Automation ValuePattern + PostMessage 在后台执行 DevTools 命令，没有激活 Chrome、切换前台或影响游戏窗口。
+- 临时注入 0.3.0 后：31 个旧版组件、1 个练习块；面板版本 0.3.0，API 与连续答题设置可见，`continuous=true`，TTS Key 已存在（长度 51），AI/ASR Key 为空。
+- 第 9/47 题已是提交状态；第 10/47 题是待作答 type 8 写作题，页面答案为空。由于 AI Key 未配置，完整连续答题会按设计在此暂停，不能宣称已经流畅挂完整课程。
+- 当前浏览器安装的正式面板仍是 0.2.1；临时注入的 0.3.0 会在刷新后消失，必须手动更新用户脚本。
 
 **尚未完成：在实际脚本管理器中更新 0.3.0、重新导出诊断确认组件可见；用真实 AI/ASR/TTS Key 验证各类 API 调用；在真实听力题和新的 legacy_18 题上完成 Submit→结果页→刷新持久性验收。**
 
 ## 自动验证
 
-执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 76 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
+执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 77 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
 
 覆盖：
 

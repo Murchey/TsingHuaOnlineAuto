@@ -66,13 +66,21 @@ export class Controller {
     try {
       await this.withLock(selected.key.split(':').slice(0, -2).join(':'), async () => {
         check(signal); this.adapter.assertContext(selected);
-        const units = settings.allLoaded ? this.adapter.discover().filter(u => u.catalogId === selected.catalogId) : [selected];
+        let units = settings.allLoaded ? this.adapter.discover().filter(u => u.catalogId === selected.catalogId) : [selected];
         if (!units.some(u => u.key === selected.key)) throw new Halt('STALE_PAGE', '所选练习已离开页面');
         this.update({ unitsTotal: units.length });
-        for (const unit of units) {
+        let index = 0;
+        while (index < units.length) {
+          const unit = units[index++];
           check(signal); this.adapter.assertContext(unit);
           await this.runUnit(unit, settings, signal);
           this.update({ unitsDone: this.progress.unitsDone + 1 });
+          // Legacy course pages expose a first-party next button; follow it until the
+          // course reports no reachable next page. Modern Vue blocks keep their old behavior.
+          if (!settings.allLoaded && this.adapter.next) {
+            const next = await this.adapter.next(unit, signal);
+            if (next) { units.push(next); this.update({ unitsTotal: units.length }); }
+          }
         }
       });
       check(signal);

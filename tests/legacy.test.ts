@@ -51,6 +51,16 @@ describe('legacy production route regression', () => {
     const broken = exercise(); broken.fillBlanks[0].answer = 'not-an-option';
     expect(() => legacyData({ exercise: broken, submitNum: 0 })).toThrow('拖拽填空');
   });
+  it('plans role-play type 9 as recording and recognizes completed sentence audio', () => {
+    const role = { id: 'role-1', name: 'Adrian' }, roleExercise = { id: 'role-q', type: 9,
+      roles: [role], sentItems: [{ id: 'sent-1', roleId: 'role-1', audioTime: '3', styleText: { paragraphs: [{ contentItems: [{ text: 'Hello' }] }] } }] };
+    const empty = legacyData({ exercise: roleExercise, submitNum: 0 });
+    expect(planTasks(empty)[0].kind).toBe('recording');
+    const saved = legacyData({ exercise: roleExercise, submitNum: 1, doRecord: { type: 9, roleId: 'role-1', answer: {
+      'sent-1': { recordAudio: 'audio-uuid', words: [{ type: 1 }] },
+    } } });
+    expect(hasCompleteResponse(saved.questionVOList[0], saved.questionAnswerItemVOList![0].userAnswer)).toBe(true);
+  });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());
     await controller.start(f.unit, { ...defaults, intervalMs: 0 });

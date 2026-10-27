@@ -59,5 +59,6 @@ export interface Adapter {
   fill(unit: Unit, task: Task, signal: AbortSignal): Promise<unknown>;
   record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown>;
   submit(unit: Unit, signal: AbortSignal): Promise<void>;
+  next?(unit: Unit, signal: AbortSignal): Promise<Unit | undefined>;
   conflict(): string | null;
 }

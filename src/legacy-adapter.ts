@@ -129,7 +129,8 @@ export class LegacyAdapter implements Adapter {
   }
   async record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown> {
     const { component: c, root } = this.leaf(unit, task);
-    if (Number(c.exercise.type) !== 20) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
+    if (![9, 20].includes(Number(c.exercise.type))) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
+    if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
     if (!navigator.mediaDevices?.getUserMedia) throw new Halt('MICROPHONE', '浏览器未提供麦克风');
     let cancelled = false;
     try {
@@ -159,11 +160,66 @@ export class LegacyAdapter implements Adapter {
       if (c.recorder?.state === 'recording') { clearTimeout(c.timer); c.recorder.reset(); c.isStart = false; }
     }
   }
+  private async recordRolePlay(unit: Unit, task: Task, settings: Settings, signal: AbortSignal,
+    c: LegacyComponent, root: HTMLElement): Promise<unknown> {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Halt('MICROPHONE', '浏览器未提供麦克风');
+    let cancelled = false;
+    try {
+      const stream = await bounded(navigator.mediaDevices.getUserMedia({ audio: true }).then(s => {
+        if (cancelled) s.getTracks().forEach(t => t.stop()); return s;
+      }), settings.timeoutMs, signal);
+      stream.getTracks().forEach(t => t.stop());
+    } catch { throw new Halt('MICROPHONE', '麦克风权限被拒绝、取消或设备不可用'); }
+    finally { cancelled = true; }
+    const ext = object(task.question.extension), items = Array.isArray(ext.sentItems) ? ext.sentItems.map(object) : [];
+    const roles = Array.isArray(ext.roles) ? ext.roles.map(object) : [];
+    if (!items.length || !roles.length || typeof c.selectRole !== 'function' || typeof c.start !== 'function') {
+      throw new Halt('RECORDING_DOM', '角色扮演题缺少角色、句子或启动控件');
+    }
+    const roleId = c.doRecord?.roleId || roles[0].id;
+    if (!roleId) throw new Halt('RECORDING_DOM', '角色扮演题没有可选角色');
+    this.run(unit, () => c.selectRole(roleId));
+    const roleStart = root.querySelector<HTMLButtonElement>('.lib-role-select-start button');
+    if (roleStart && !c.isClose) roleStart.click();
+    else this.run(unit, () => c.start());
+    await until(() => c.isClose === true || c.readingIndex != null ? true : undefined, 12_000, signal);
+    for (const item of items) {
+      check(signal); this.editable(unit);
+      const answer: any = object(c.doRecord.answer)[String(item.id)] || {};
+      if (answer.recordAudio) continue;
+      const target = [...root.querySelectorAll<HTMLElement>('[data-id], .lib-role-play-item, .lib-role-play-sentence')]
+        .find(el => el.getAttribute('data-id') === String(item.id) || el.textContent?.includes(String(item.text || '').slice(0, 18)));
+      const recordButton = target?.querySelector<HTMLElement>('img[title="录音"],button[title="录音"]') ||
+        root.querySelector<HTMLElement>(`[data-id="${String(item.id).replace(/"/g, '')}"] img`);
+      if (!recordButton && typeof c.playVadio !== 'function') throw new Halt('RECORD_CONTROL', `角色扮演句子 ${item.id} 没有录音控件`);
+      if (typeof c.playVadio === 'function') this.run(unit, () => c.playVadio(item));
+      else recordButton!.click();
+      const timeout = Math.min(180_000, (Number(item.audioTime) > 35 ? 39 : Number(item.audioTime) || 9) * 1000 + 10_000);
+      await until(() => {
+        const current: any = object(c.doRecord.answer)[String(item.id)];
+        return current && current.recordAudio ? true : undefined;
+      }, timeout, signal);
+    }
+    return legacyValue(task.question, c.doRecord);
+  }
   async submit(unit: Unit, signal: AbortSignal): Promise<void> {
     check(signal); this.editable(unit);
     const buttons = [...unit.root.querySelectorAll<HTMLButtonElement>('button')].filter(b =>
       /^Submit$/i.test(b.textContent?.trim() || '') && !b.disabled && shown(b));
     if (buttons.length !== 1) throw new Halt('SUBMIT_CONTROL', '无法唯一识别旧版 Submit 按钮，已暂停');
     buttons[0].click();
+  }
+  async next(unit: Unit, signal: AbortSignal): Promise<Unit | undefined> {
+    check(signal); this.assertContext(unit);
+    const right = [...document.querySelectorAll<HTMLElement>('.page-next')].find(el =>
+      !!el.querySelector('img[src*="tx_page_right"]') && shown(el));
+    if (!right || right.getAttribute('aria-disabled') === 'true' || right.classList.contains('disabled')) return undefined;
+    const oldKey = unit.key;
+    right.click();
+    await until(() => {
+      const found = this.discover()[0];
+      return found && found.key !== oldKey ? found : undefined;
+    }, 20_000, signal);
+    return this.discover()[0];
   }
 }

@@ -19,6 +19,16 @@ describe('practice execution and recovery', () => {
     const raw = localStorage.getItem('thoa:v1:' + f.unit.key)!;
     expect(raw).not.toContain('Hello'); expect(raw).not.toContain('Blue'); expect(raw).not.toContain('Nice to meet');
   });
+  it('follows adapter next pages until the adapter reports the reachable end', async () => {
+    const f = fakeAdapter(data(choice));
+    const second = { ...f.unit, key: f.unit.key + ':next', contentId: '31', title: '下一题' };
+    let nextCalls = 0;
+    f.adapter.next = vi.fn(async () => nextCalls++ === 0 ? second : undefined);
+    const c = new Controller(f.adapter, new Store(), lock);
+    await c.start(f.unit, settings);
+    expect(f.adapter.next).toHaveBeenCalledTimes(2);
+    expect(c.progress.unitsDone).toBe(2);
+  });
   it('preflights every question before changing any answer', async () => {
     const f = fakeAdapter(data(choice, { ...writing, answer: '' })), c = new Controller(f.adapter, new Store(), lock);
     await c.start(f.unit, settings);

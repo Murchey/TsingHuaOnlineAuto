@@ -26,6 +26,15 @@ export function legacyQuestion(exercise: unknown): Question {
     }
   } else if ([6, 7, 8].includes(type)) {
     q.type = 'essay_questions_answers'; q.answer = text(e.answer);
+  } else if (type === 9) {
+    q.type = 'legacy_9';
+    q.extension = {
+      roles: Array.isArray(e.roles) ? e.roles.map(r => ({ id: object(r).id, name: object(r).name })) : [],
+      sentItems: Array.isArray(e.sentItems) ? e.sentItems.map(s => ({
+        idx: object(s).id, roleId: object(s).roleId, audioTime: object(s).audioTime,
+        text: text(object(s).styleText),
+      })) : [],
+    };
   } else if (type === 20) {
     q.type = 'oral_simple_speak';
   }
@@ -38,6 +47,10 @@ export function legacyValue(q: Question, record: unknown): unknown {
     answer: object(q.extension).legacyType === 24 ? object(v).choiceId : object(v).content }));
   if (q.type.startsWith('essay_')) return { answer: a, annex: [] };
   if (q.type === 'oral_simple_speak') return { audio: typeof a === 'string' ? a : '' };
+  if (q.type === 'legacy_9') {
+    const answers = object(a);
+    return Object.entries(answers).map(([idx, value]) => ({ idx, audio: object(value).recordAudio || '' }));
+  }
   return a;
 }
 

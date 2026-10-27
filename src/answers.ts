@@ -30,7 +30,7 @@ export function taskFor(q: Question, record?: AnswerRecord): Task {
   const raw = q.answer !== '' && q.answer != null ? q.answer : record?.answer;
   const answer = parse(raw);
   const extension = parse(q.extension);
-  if (['oral_simple_speak', 'oral_follow_along', 'oral_vocabulary_learning'].includes(q.type)) {
+  if (['oral_simple_speak', 'oral_follow_along', 'oral_vocabulary_learning', 'legacy_9'].includes(q.type)) {
     return { question: q, kind: 'recording' };
   }
   if (['choice_single', 'choice_multiple', 'judge_basic'].includes(q.type)) {
@@ -118,6 +118,8 @@ export function canonical(q: Question, value: unknown): unknown {
     .map(a => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
   if (q.type.startsWith('essay_')) return { answer: String(object(v).answer ?? '').replace(/\r\n/g, '\n').trim() };
   if (q.type === 'oral_simple_speak') return { audio: audioId(object(v).audio) };
+  if (q.type === 'legacy_9') return Array.isArray(v) ? v.map(object).map(a => ({ idx: a.idx, audio: audioId(String(a.audio || '')) }))
+    .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
   if (q.type === 'oral_follow_along' || q.type === 'oral_vocabulary_learning') return Array.isArray(v) ?
     v.map(object).map(a => ({ idx: a.idx, audio: audioId(object(a.answer).audio) }))
       .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
@@ -135,6 +137,14 @@ export function hasCompleteResponse(q: Question, value: unknown): boolean {
   }
   if (q.type.startsWith('essay_')) return typeof object(v).answer === 'string' && !!String(object(v).answer).trim();
   if (q.type === 'oral_simple_speak') return typeof object(v).audio === 'string' && !!object(v).audio;
+  if (q.type === 'legacy_9') {
+    const items = object(q.extension).sentItems;
+    if (!Array.isArray(items) || !items.length || !Array.isArray(v) || v.length !== items.length) return false;
+    return items.every(item => {
+      const idx = String(object(item).idx), matches = v.map(object).filter(a => String(a.idx) === idx);
+      return matches.length === 1 && typeof matches[0].audio === 'string' && !!matches[0].audio;
+    });
+  }
   if (q.type === 'fill_base' || q.type === 'oral_follow_along' || q.type === 'oral_vocabulary_learning') {
     const ext = parse(q.extension);
     const ids = q.type === 'fill_base' ? [...new DOMParser().parseFromString(q.stem || '', 'text/html')

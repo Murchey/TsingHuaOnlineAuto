@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.1.1
+// @version      0.1.2
 // @description  日常练习填写、真实麦克风录音、提交核对及故障诊断
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -117,7 +117,7 @@
     const raw = q.answer !== "" && q.answer != null ? q.answer : record?.answer;
     const answer = parse(raw);
     const extension = parse(q.extension);
-    if (["oral_simple_speak", "oral_follow_along", "oral_vocabulary_learning"].includes(q.type)) {
+    if (["oral_simple_speak", "oral_follow_along", "oral_vocabulary_learning", "legacy_9"].includes(q.type)) {
       return { question: q, kind: "recording" };
     }
     if (["choice_single", "choice_multiple", "judge_basic"].includes(q.type)) {
@@ -196,6 +196,7 @@
     if (q.type === "fill_base") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type.startsWith("essay_")) return { answer: String(object(v).answer ?? "").replace(/\r\n/g, "\n").trim() };
     if (q.type === "oral_simple_speak") return { audio: audioId(object(v).audio) };
+    if (q.type === "legacy_9") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, audio: audioId(String(a.audio || "")) })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type === "oral_follow_along" || q.type === "oral_vocabulary_learning") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, audio: audioId(object(a.answer).audio) })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     return v;
   }
@@ -208,6 +209,14 @@
     }
     if (q.type.startsWith("essay_")) return typeof object(v).answer === "string" && !!String(object(v).answer).trim();
     if (q.type === "oral_simple_speak") return typeof object(v).audio === "string" && !!object(v).audio;
+    if (q.type === "legacy_9") {
+      const items = object(q.extension).sentItems;
+      if (!Array.isArray(items) || !items.length || !Array.isArray(v) || v.length !== items.length) return false;
+      return items.every((item) => {
+        const idx = String(object(item).idx), matches = v.map(object).filter((a) => String(a.idx) === idx);
+        return matches.length === 1 && typeof matches[0].audio === "string" && !!matches[0].audio;
+      });
+    }
     if (q.type === "fill_base" || q.type === "oral_follow_along" || q.type === "oral_vocabulary_learning") {
       const ext = parse(q.extension);
       const ids = q.type === "fill_base" ? [...new DOMParser().parseFromString(q.stem || "", "text/html").querySelectorAll("span.zty-exercise-item-fill-blank[id]")].map((el) => el.id) : q.type === "oral_follow_along" ? object(ext).sentItems : ext;
@@ -589,6 +598,17 @@
     } else if ([6, 7, 8].includes(type)) {
       q.type = "essay_questions_answers";
       q.answer = text(e.answer);
+    } else if (type === 9) {
+      q.type = "legacy_9";
+      q.extension = {
+        roles: Array.isArray(e.roles) ? e.roles.map((r) => ({ id: object(r).id, name: object(r).name })) : [],
+        sentItems: Array.isArray(e.sentItems) ? e.sentItems.map((s) => ({
+          idx: object(s).id,
+          roleId: object(s).roleId,
+          audioTime: object(s).audioTime,
+          text: text(object(s).styleText)
+        })) : []
+      };
     } else if (type === 20) {
       q.type = "oral_simple_speak";
     }
@@ -602,6 +622,10 @@
     }));
     if (q.type.startsWith("essay_")) return { answer: a, annex: [] };
     if (q.type === "oral_simple_speak") return { audio: typeof a === "string" ? a : "" };
+    if (q.type === "legacy_9") {
+      const answers = object(a);
+      return Object.entries(answers).map(([idx, value]) => ({ idx, audio: object(value).recordAudio || "" }));
+    }
     return a;
   }
   function legacyData(payload) {
@@ -752,7 +776,8 @@
     }
     async record(unit, task, settings, signal) {
       const { component: c, root } = this.leaf(unit, task);
-      if (Number(c.exercise.type) !== 20) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
+      if (![9, 20].includes(Number(c.exercise.type))) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
+      if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
       if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
       let cancelled = false;
       try {
@@ -793,12 +818,69 @@
         }
       }
     }
+    async recordRolePlay(unit, task, settings, signal, c, root) {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
+      let cancelled = false;
+      try {
+        const stream = await bounded(navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => {
+          if (cancelled) s.getTracks().forEach((t) => t.stop());
+          return s;
+        }), settings.timeoutMs, signal);
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {
+        throw new Halt("MICROPHONE", "麦克风权限被拒绝、取消或设备不可用");
+      } finally {
+        cancelled = true;
+      }
+      const ext = object(task.question.extension), items = Array.isArray(ext.sentItems) ? ext.sentItems.map(object) : [];
+      const roles = Array.isArray(ext.roles) ? ext.roles.map(object) : [];
+      if (!items.length || !roles.length || typeof c.selectRole !== "function" || typeof c.start !== "function") {
+        throw new Halt("RECORDING_DOM", "角色扮演题缺少角色、句子或启动控件");
+      }
+      const roleId = c.doRecord?.roleId || roles[0].id;
+      if (!roleId) throw new Halt("RECORDING_DOM", "角色扮演题没有可选角色");
+      this.run(unit, () => c.selectRole(roleId));
+      const roleStart = root.querySelector(".lib-role-select-start button");
+      if (roleStart && !c.isClose) roleStart.click();
+      else this.run(unit, () => c.start());
+      await until(() => c.isClose === true || c.readingIndex != null ? true : void 0, 12e3, signal);
+      for (const item of items) {
+        check(signal);
+        this.editable(unit);
+        const answer = object(c.doRecord.answer)[String(item.id)] || {};
+        if (answer.recordAudio) continue;
+        const target = [...root.querySelectorAll("[data-id], .lib-role-play-item, .lib-role-play-sentence")].find((el) => el.getAttribute("data-id") === String(item.id) || el.textContent?.includes(String(item.text || "").slice(0, 18)));
+        const recordButton = target?.querySelector('img[title="录音"],button[title="录音"]') || root.querySelector(`[data-id="${String(item.id).replace(/"/g, "")}"] img`);
+        if (!recordButton && typeof c.playVadio !== "function") throw new Halt("RECORD_CONTROL", `角色扮演句子 ${item.id} 没有录音控件`);
+        if (typeof c.playVadio === "function") this.run(unit, () => c.playVadio(item));
+        else recordButton.click();
+        const timeout = Math.min(18e4, (Number(item.audioTime) > 35 ? 39 : Number(item.audioTime) || 9) * 1e3 + 1e4);
+        await until(() => {
+          const current = object(c.doRecord.answer)[String(item.id)];
+          return current && current.recordAudio ? true : void 0;
+        }, timeout, signal);
+      }
+      return legacyValue(task.question, c.doRecord);
+    }
     async submit(unit, signal) {
       check(signal);
       this.editable(unit);
       const buttons = [...unit.root.querySelectorAll("button")].filter((b) => /^Submit$/i.test(b.textContent?.trim() || "") && !b.disabled && shown(b));
       if (buttons.length !== 1) throw new Halt("SUBMIT_CONTROL", "无法唯一识别旧版 Submit 按钮，已暂停");
       buttons[0].click();
+    }
+    async next(unit, signal) {
+      check(signal);
+      this.assertContext(unit);
+      const right = [...document.querySelectorAll(".page-next")].find((el) => !!el.querySelector('img[src*="tx_page_right"]') && shown(el));
+      if (!right || right.getAttribute("aria-disabled") === "true" || right.classList.contains("disabled")) return void 0;
+      const oldKey = unit.key;
+      right.click();
+      await until(() => {
+        const found = this.discover()[0];
+        return found && found.key !== oldKey ? found : void 0;
+      }, 2e4, signal);
+      return this.discover()[0];
     }
   };
 
@@ -826,6 +908,9 @@
     }
     submit(unit, signal) {
       return this.active.submit(unit, signal);
+    }
+    next(unit, signal) {
+      return this.active.next?.(unit, signal) || Promise.resolve(void 0);
     }
     conflict() {
       return this.active.conflict();
@@ -915,14 +1000,23 @@
         await this.withLock(selected.key.split(":").slice(0, -2).join(":"), async () => {
           check(signal);
           this.adapter.assertContext(selected);
-          const units = settings.allLoaded ? this.adapter.discover().filter((u) => u.catalogId === selected.catalogId) : [selected];
+          let units = settings.allLoaded ? this.adapter.discover().filter((u) => u.catalogId === selected.catalogId) : [selected];
           if (!units.some((u) => u.key === selected.key)) throw new Halt("STALE_PAGE", "所选练习已离开页面");
           this.update({ unitsTotal: units.length });
-          for (const unit of units) {
+          let index = 0;
+          while (index < units.length) {
+            const unit = units[index++];
             check(signal);
             this.adapter.assertContext(unit);
             await this.runUnit(unit, settings, signal);
             this.update({ unitsDone: this.progress.unitsDone + 1 });
+            if (!settings.allLoaded && this.adapter.next) {
+              const next = await this.adapter.next(unit, signal);
+              if (next) {
+                units.push(next);
+                this.update({ unitsTotal: units.length });
+              }
+            }
           }
         });
         check(signal);
@@ -1070,7 +1164,7 @@
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.1.1";
+      this.el("version").textContent = false ? "dev" : "0.1.2";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("collapse").addEventListener("click", () => {
@@ -1233,7 +1327,7 @@
       } catch {
       }
       return {
-        version: false ? "dev" : "0.1.1",
+        version: false ? "dev" : "0.1.2",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

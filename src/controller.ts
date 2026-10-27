@@ -38,7 +38,8 @@ export class Controller {
   private active = false;
   private stopStatus: 'paused' | 'stopped' = 'paused';
   private listeners = new Set<() => void>();
-  constructor(public adapter: Adapter, public store: Store, private withLock: WithLock = browserLock) {}
+  constructor(public adapter: Adapter, public store: Store, private withLock: WithLock = browserLock,
+    private reload: () => void = () => location.reload()) {}
   subscribe(fn: () => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   private emit(): void { this.listeners.forEach(fn => fn()); }
   private update(value: Partial<Progress>): void { Object.assign(this.progress, value); this.emit(); }
@@ -69,6 +70,7 @@ export class Controller {
         let units = settings.allLoaded ? this.adapter.discover().filter(u => u.catalogId === selected.catalogId) : [selected];
         if (!units.some(u => u.key === selected.key)) throw new Halt('STALE_PAGE', '所选练习已离开页面');
         this.update({ unitsTotal: units.length });
+        const seen = new Set(units.map(entry => entry.key));
         let index = 0;
         while (index < units.length) {
           const unit = units[index++];
@@ -78,8 +80,18 @@ export class Controller {
           // Legacy course pages expose a first-party next button; follow it until the
           // course reports no reachable next page. Modern Vue blocks keep their old behavior.
           if (settings.continuous && this.adapter.next) {
-            const next = await this.adapter.next(unit, signal);
-            if (next) { units.push(next); this.update({ unitsTotal: units.length }); }
+            const next = await this.adapter.next(unit, signal, settings, () => {
+              this.store.clearCourse(unit.key);
+              // A genuine Rechallenge intentionally restarts the goal, so those pages
+              // may be revisited once. Plain navigation cycles must not.
+              seen.clear();
+            });
+            if (next) {
+              if (seen.has(next.key)) {
+                throw new Halt('PAGE_CYCLE', '练习在未 Rechallenge 的情况下回到已完成的页面，已停止以避免重复提交');
+              }
+              seen.add(next.key); units.push(next); this.update({ unitsTotal: units.length });
+            }
           }
         }
       });
@@ -90,6 +102,17 @@ export class Controller {
       if (signal.aborted) {
         const status = this.stopStatus as 'paused' | 'stopped';
         this.update({ status, message: status === 'stopped' ? '已停止' : '已暂停，可继续重新核对' });
+      }
+      else if (halt.code === 'NEEDS_RELOAD') {
+        // The legacy page occasionally renders an exercise without its answer controls.
+        // A reload repairs it; the resume flag survives the navigation in sessionStorage.
+        if (this.store.requestResume()) {
+          this.report('RELOAD', '页面作答控件未渲染，正在自动刷新并继续', true);
+          this.reload();
+        } else {
+          this.update({ status: 'paused' });
+          this.report('RELOAD_LIMIT', `${halt.message}；已自动刷新 3 次仍未恢复，请手动刷新页面`, true);
+        }
       }
       else { this.update({ status: 'paused' }); this.report(halt.code, halt.message, true); }
     } finally { this.active = false; this.emit(); }
@@ -103,17 +126,30 @@ export class Controller {
       if (isSaved(data, old.baseline, old.expected, old.fingerprint)) {
         this.store.save({ ...old, phase: 'verified', updatedAt: Date.now() });
         this.update({ completed: Object.keys(old.expected).length, total: Object.keys(old.expected).length });
-        this.report('RECONCILED', '已核对服务器上的提交记录，跳过重复提交'); return;
+        this.report('RECONCILED', '已核对服务器上的提交记录，跳过重复提交');
+        this.store.resetResume(); return;
       }
       if (old.phase === 'pending') {
         throw new Halt('PENDING_SUBMIT', '上次提交结果尚不能确认，已阻止再次提交；请在网页核查后重置本地记录');
       }
       // A previously verified checkpoint never authorizes skipping a changed server record.
-      throw new Halt('RECORD_CHANGED', '服务器作答记录与本地记录不一致，请核查后重置本地记录');
+      // The site does, however, reset a goal's answers while keeping its submit counter;
+      // when nothing on the server is complete any more, a fresh attempt is safe.
+      const answered = leaves(data.questionVOList).some(question => {
+        const record = (data.questionAnswerItemVOList || []).find(entry => String(entry.questionId) === String(question.id));
+        return !!record && hasCompleteResponse(question, record.userAnswer);
+      });
+      // A vanished record (counter 0) stays a hard stop; only a site-side reset that kept
+      // the submission counter is safe to retry automatically.
+      if (answered || (data.answerCount || 0) <= 0) {
+        throw new Halt('RECORD_CHANGED', '服务器作答记录与本地记录不一致，请核查后重置本地记录');
+      }
+      this.store.clear(unit.key);
     }
     if (completedOnServer(data)) {
       this.update({ completed: leaves(data.questionVOList).length, total: leaves(data.questionVOList).length });
-      this.report('ALREADY_SAVED', '服务器已有完整作答记录，保持现有结果'); return;
+      this.report('ALREADY_SAVED', '服务器已有完整作答记录，保持现有结果');
+      this.store.resetResume(); return;
     }
     this.update({ phase: '解析', total: leaves(data.questionVOList).length });
     // Preflight the entire block: no partial random answers or trial submissions to reveal keys.
@@ -156,7 +192,8 @@ export class Controller {
       if (isSaved(saved, checkpoint.baseline, checkpoint.expected, checkpoint.fingerprint)) {
         check(signal);
         this.store.save({ ...checkpoint, phase: 'verified', updatedAt: Date.now() });
-        this.report('VERIFIED', '提交成功，已重新读取并逐题核对作答记录'); return;
+        this.report('VERIFIED', '提交成功，已重新读取并逐题核对作答记录');
+        this.store.resetResume(); return;
       }
       await sleep(Math.min(1_000, Math.max(1, deadline - Date.now())), signal);
     } while (Date.now() < deadline);

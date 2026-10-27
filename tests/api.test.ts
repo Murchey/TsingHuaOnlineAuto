@@ -4,7 +4,7 @@ import { defaults, type Settings } from '../src/model';
 
 const signal = () => new AbortController().signal;
 const cfg = (overrides: Partial<Settings> = {}): Settings => ({ ...defaults, ...overrides });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 it('uses MiMo chat-completions TTS by default and decodes audio', async () => {
   const calls: any[] = [], bytes = new Uint8Array([1, 2, 3]);
@@ -44,6 +44,31 @@ it('parses AI answers and sends ASR multipart audio', async () => {
     .resolves.toBe('listening transcript');
 });
 
+it('uses MiMo chat-completions ASR with an input_audio part', async () => {
+  const calls: any[] = [];
+  vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
+    calls.push(details);
+    details.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'hello world' } }] }) });
+    return { abort: vi.fn() };
+  });
+  const text = await transcribeAudio(new Uint8Array([1, 2, 3]).buffer, 'clip.mp3',
+    cfg({ asrApiKey: 'k', asrApiBase: 'https://api.xiaomimimo.com/v1', asrModel: 'mimo-v2.5-asr' }), signal());
+  expect(text).toBe('hello world');
+  expect(calls[0].url).toBe('https://api.xiaomimimo.com/v1/chat/completions');
+  const body = JSON.parse(calls[0].data);
+  expect(body.model).toBe('mimo-v2.5-asr');
+  expect(body.messages[0].content[0]).toMatchObject({ type: 'input_audio', input_audio: { format: 'mp3', data: 'AQID' } });
+});
+it('times out a hung userscript-manager request instead of freezing', async () => {
+  vi.useFakeTimers();
+  const abort = vi.fn();
+  vi.stubGlobal('GM_xmlhttpRequest', () => ({ abort }));
+  const pending = answerWithAi('q', cfg({ aiApiKey: 'k' }), signal());
+  const assertion = expect(pending).rejects.toThrow('超时');
+  await vi.advanceTimersByTimeAsync(61_000);
+  await assertion;
+  expect(abort).toHaveBeenCalled();
+});
 it('requires independent AI, ASR and TTS keys', async () => {
   await expect(answerWithAi('q', cfg({ aiApiKey: '' }), signal())).rejects.toThrow('AI API Key');
   await expect(transcribeAudio(new ArrayBuffer(1), 'q.mp3', cfg({ asrApiKey: '' }), signal())).rejects.toThrow('ASR');

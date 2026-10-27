@@ -51,6 +51,11 @@ export function taskFor(q: Question, record?: AnswerRecord, allowMissing = false
     }
     return { question: q, kind: 'choice', value: q.type === 'choice_multiple' ? values : values[0] };
   }
+  if (q.type === 'legacy_11') {
+    const targets = object(q.extension).targets;
+    if (!Array.isArray(targets) || !targets.length) throw new Halt('DATA_SHAPE', `分类题 ${q.id} 的目标缺失`);
+    return { question: q, kind: 'fill', value: targets.map(target => ({ idx: String(object(target).id), answers: [] as string[] })) };
+  }
   if (q.type === 'fill_base') {
     const doc = new DOMParser().parseFromString(q.stem || '', 'text/html');
     const ids = [...doc.querySelectorAll('span.zty-exercise-item-fill-blank[id]')].map(el => el.id);
@@ -123,6 +128,9 @@ function audioId(value: unknown): string {
 export function canonical(q: Question, value: unknown): unknown {
   const v = q.type === 'choice_single' || q.type === 'judge_basic' ? value : parse(value);
   if (q.type === 'choice_multiple') return Array.isArray(v) ? [...v].sort() : v;
+  if (q.type === 'legacy_11') return Array.isArray(v) ? v.map(object).map(group => ({ idx: group.idx,
+    answers: Array.isArray(group.answers) ? (group.answers as unknown[]).map(String).sort() : [] }))
+    .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
   if (q.type === 'fill_base') return Array.isArray(v) ? v.map(object)
     .map(a => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
   if (q.type.startsWith('essay_')) return { answer: String(object(v).answer ?? '').replace(/\r\n/g, '\n').trim() };
@@ -182,6 +190,21 @@ export function hasCompleteResponse(q: Question, value: unknown): boolean {
     if (answeredIds.size !== answers.length || [...answeredIds].some(idx => !itemById.has(idx))) return false;
     const expected = items.filter(item => String(object(item).roleId ?? '') === roleId);
     return expected.length > 0 && expected.every(item => answeredIds.has(String(object(item).idx)));
+  }
+  if (q.type === 'legacy_11') {
+    const items = object(q.extension).items;
+    const ids = new Set((Array.isArray(items) ? items : []).map(item => String(object(item).id)));
+    if (!ids.size || !Array.isArray(v)) return false;
+    const seen = new Set<string>();
+    for (const group of v.map(object)) {
+      const answers = Array.isArray(group.answers) ? (group.answers as unknown[]).map(String) : [];
+      if (!answers.length) return false;
+      for (const id of answers) {
+        if (!ids.has(id) || seen.has(id)) return false;
+        seen.add(id);
+      }
+    }
+    return seen.size === ids.size;
   }
   if (q.type === 'fill_base' || q.type === 'oral_follow_along' || q.type === 'oral_vocabulary_learning') {
     const ext = parse(q.extension);

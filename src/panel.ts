@@ -44,6 +44,7 @@ export class Panel {
           <label for="units">当前练习</label><select id="units" aria-label="当前练习"></select>
           <div class="row"><label><input id="all" type="checkbox"> 处理当前页全部已加载练习块</label></div>
           <div class="row"><label><input id="continuous" type="checkbox"> 完成后自动进入下一题/下一页</label></div>
+          <div class="row"><label><input id="autoRechallenge" type="checkbox"> 目标未通过时自动 Rechallenge（最多 2 次）</label></div>
           <div class="row"><label>口语录音时长 <input id="seconds" type="number" min="3" max="180" step="1"> 秒</label></div>
           <div class="row"><label>角色扮演/跟读录音来源<select id="rolePlayMode">
             <option value="original">原题音频 → Chivox 评测（生成评分）</option>
@@ -86,6 +87,7 @@ export class Panel {
     this.input('seconds').value = String(this.settings.recordingSeconds);
     (this.el('rolePlayMode') as HTMLSelectElement).value = this.settings.rolePlayAudioMode;
     this.input('continuous').checked = this.settings.continuous;
+    this.input('autoRechallenge').checked = this.settings.autoRechallenge;
     this.input('aiAnswers').checked = this.settings.aiAnswers;
     this.input('aiApiKey').value = this.settings.aiApiKey;
     this.input('aiApiBase').value = this.settings.aiApiBase;
@@ -113,6 +115,7 @@ export class Panel {
         const provider = (this.el('ttsProvider') as HTMLSelectElement).value;
         this.settings = { ...defaults, allLoaded: this.input('all').checked,
           continuous: this.input('continuous').checked,
+          autoRechallenge: this.input('autoRechallenge').checked,
           recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds,
           rolePlayAudioMode: ['original', 'sample', 'microphone'].includes(mode) ?
             mode as Settings['rolePlayAudioMode'] : defaults.rolePlayAudioMode,
@@ -164,6 +167,20 @@ export class Panel {
     document.addEventListener('keydown', this.keydown);
     this.refresh();
     this.timer = setInterval(() => { if (!this.controller.busy) this.refresh(); }, 3_000);
+    void this.resume();
+  }
+  // The legacy site sometimes needs a reload to render an exercise's controls. When the
+  // controller requests one, it leaves this flag so the refreshed page continues by itself.
+  private async resume(): Promise<void> {
+    if (!this.store.takeResume()) return;
+    for (let attempt = 0; attempt < 60 && !this.disposed; attempt++) {
+      this.refresh();
+      if (this.units.length) break;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    if (this.disposed || !this.units.length || this.controller.busy) return;
+    this.controller.report('RESUME', '页面已自动刷新，继续上次作答', false);
+    void this.controller.start(this.units[0], this.settings);
   }
   refresh(manual = false): void {
     if (this.controller.busy) return;
@@ -206,7 +223,7 @@ export class Panel {
     this.el('counts').textContent = `题目 ${p.completed}/${p.total} · 练习块 ${p.unitsDone}/${p.unitsTotal}${p.type ? ' · ' + p.type : ''}`;
     const progress = this.el('progress') as HTMLProgressElement;
     progress.max = Math.max(p.total, 1); progress.value = p.completed;
-    for (const id of ['units', 'seconds', 'all', 'continuous', 'aiAnswers', 'aiApiKey', 'aiApiBase', 'aiModel', 'asrApiKey', 'asrApiBase', 'asrModel', 'ttsProvider', 'ttsApiKey', 'ttsApiBase', 'ttsModel', 'ttsVoice', 'rolePlayMode', 'refresh', 'reset']) (this.el(id) as HTMLInputElement | HTMLSelectElement).disabled = busy;
+    for (const id of ['units', 'seconds', 'all', 'continuous', 'autoRechallenge', 'aiAnswers', 'aiApiKey', 'aiApiBase', 'aiModel', 'asrApiKey', 'asrApiBase', 'asrModel', 'ttsProvider', 'ttsApiKey', 'ttsApiBase', 'ttsModel', 'ttsVoice', 'rolePlayMode', 'refresh', 'reset']) (this.el(id) as HTMLInputElement | HTMLSelectElement).disabled = busy;
     (this.el('start') as HTMLButtonElement).disabled = busy || !this.units.length;
     this.el('start').textContent = p.status === 'paused' || p.status === 'stopped' ? '继续' : '开始';
     (this.el('pause') as HTMLButtonElement).disabled = !busy;

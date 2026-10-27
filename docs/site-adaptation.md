@@ -28,6 +28,16 @@
 
 type 8 实际为 `LIB-ORAL-BRIEF-EXERCISE-CS-STUDY` 口语简答，不是 textarea 写作。其 `doRecord.answer` 是 VOD 音频 ID，`ossOrVod=2`。0.3.1 使用 AI 生成 2-4 句英语回答，TTS 合成 MP3，再调用原站 `vodUploadService.vodStartUpload({name, blob}, true)`，通过 `onVodComplete` 取 ID 并写回 `doRecord`。页面结果出现“闯关失败”弹窗时，`next()` 抛出 `GOAL_FAILED` 并暂停，避免右箭头被弹窗吞掉后卡住；自动 Rechallenge 尚未启用。
 
+0.3.2 继续补齐旧版学生页：
+
+- 对话填空 19（`LIB-FILL-BLANK-DIALOGUE-EXERCISE-CS-STUDY`）：`dialogueContents` 中 `type=2` 的项是空格，`fillBlanks[].id` 对应 `doRecord.answer[id].content`，页面可编辑元素 id 为 `a-<blankId>`。题目自带 `audioScript` 时，按空位相邻文本在原文中定位并逐字还原；只有原文无法完整解析时才交给 AI。
+- 分类拖拽 11（`LIB-DRAG-DROP-MANY-EXERCISE-CS-STUDY`）：`drag[]` 是目标区，`dragged[]` 是待分类项，`doRecord.answer[targetId].choiceIds` 保存分配。适配器先重置目标桶，再按 AI 结果调用原站 `drag({ previousContainer, container, item })` 与 `answerChange()`。
+- 组合题 14/15/16/25：子题继承父题 `audioScript`，听力类子题无需重复 ASR。
+- 页面偶发只渲染题干、不渲染作答控件时，`exerciseStatus` 会停在 0。适配器在 Angular Zone 内最多三次调用原站 `loadDoRecord()`；仍不可用时抛出 `NEEDS_RELOAD`，控制器在 `sessionStorage` 写入续跑标记后 `location.reload()`。面板启动后轮询发现练习并自动继续，最多 3 次，避免刷新死循环。
+- 未经过 Rechallenge 却被右箭头带回已完成页面时，控制器以 `PAGE_CYCLE` 停止；真正的 Rechallenge 会清空“已见页面”集合，允许目标重做。
+- 站点重置某关答案但保留 `submitNum`（服务器上没有任何完整作答）时，已校验 checkpoint 会自动清理并重新作答；服务器记录完全消失仍以 `RECORD_CHANGED` 暂停。
+- MiMo ASR 使用 `/chat/completions`，user content 仅含 `input_audio`；OpenAI 兼容 ASR 仍走 multipart `/audio/transcriptions`。
+
 ## 新版 Vue
 
 公开首页及其第一方资源：`/assets/textbook-reader-BwTC3IPT.js`、`/assets/src-CRr8PyXj.js`、`/assets/router-l05bPN5G.js`、`/assets/runtime-core.esm-bundler-DDWTrPxX.js`。文件名可能变化。

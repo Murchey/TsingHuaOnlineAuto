@@ -29,6 +29,16 @@ describe('practice execution and recovery', () => {
     expect(f.adapter.next).toHaveBeenCalledTimes(2);
     expect(c.progress.unitsDone).toBe(2);
   });
+  it('stops instead of looping when next returns an already completed page', async () => {
+    const f = fakeAdapter(data(choice));
+    const second = { ...f.unit, key: f.unit.key + ':next', contentId: '31', title: '下一题' };
+    let calls = 0;
+    f.adapter.next = vi.fn(async () => calls++ === 0 ? second : f.unit);
+    const c = new Controller(f.adapter, new Store(), lock);
+    await c.start(f.unit, settings);
+    expect(c.logs.at(-1)?.code).toBe('PAGE_CYCLE');
+    expect(f.adapter.submit).toHaveBeenCalledTimes(1);
+  });
   it('stops after the selected unit when continuous answering is disabled', async () => {
     const f = fakeAdapter(data(choice));
     const second = { ...f.unit, key: f.unit.key + ':next', contentId: '31', title: '下一题' };
@@ -37,6 +47,17 @@ describe('practice execution and recovery', () => {
     await c.start(f.unit, { ...settings, continuous: false });
     expect(c.progress.status).toBe('done'); expect(c.progress.unitsDone).toBe(1);
     expect(f.adapter.next).not.toHaveBeenCalled();
+  });
+  it('requests an automatic page reload and bounded resume when answer controls are missing', async () => {
+    const f = fakeAdapter(data(choice)), store = new Store(), reload = vi.fn();
+    f.adapter.load = vi.fn(async () => { throw new Halt('NEEDS_RELOAD', '练习作答控件未渲染'); });
+    const c = new Controller(f.adapter, store, lock, reload);
+    for (let attempt = 0; attempt < 3; attempt++) await c.start(f.unit, settings);
+    expect(reload).toHaveBeenCalledTimes(3);
+    expect(store.takeResume()).toBe(true);
+    await c.start(f.unit, settings);
+    expect(reload).toHaveBeenCalledTimes(3);
+    expect(c.logs.some(log => log.code === 'RELOAD_LIMIT')).toBe(true);
   });
   it('preflights every question before changing any answer', async () => {
     const f = fakeAdapter(data(choice, { ...writing, answer: '' })), c = new Controller(f.adapter, new Store(), lock);
@@ -56,6 +77,16 @@ describe('practice execution and recovery', () => {
     await refreshed.start(f.unit, settings);
     expect(refreshed.progress.status).toBe('done'); expect(f.adapter.submit).toHaveBeenCalledTimes(1);
     expect(f.adapter.fill).toHaveBeenCalledTimes(1);
+  });
+  it('re-answers a verified exercise after the site resets its server answers', async () => {
+    const f = fakeAdapter(data(choice)), store = new Store();
+    await new Controller(f.adapter, store, lock).start(f.unit, settings);
+    expect(store.read(f.unit.key)?.phase).toBe('verified');
+    f.server = { ...data(choice), answerCount: 1, questionAnswerItemVOList: [{ questionId: 101, userAnswer: '' }] };
+    const c = new Controller(f.adapter, store, lock);
+    await c.start(f.unit, settings);
+    expect(c.progress.status).toBe('done');
+    expect(f.adapter.submit).toHaveBeenCalledTimes(2);
   });
   it('persists pending intent before a submission failure and blocks automatic retry', async () => {
     const f = fakeAdapter(data(choice)), store = new Store();

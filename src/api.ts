@@ -35,10 +35,16 @@ function gmRequest(options: RequestOptions, timeout: number, signal: AbortSignal
   if (typeof gm !== 'function') return Promise.reject(new Halt('API_GM', '当前脚本管理器没有提供 GM_xmlhttpRequest'));
   return new Promise<GmResponse>((resolve, reject) => {
     if (signal.aborted) { reject(new Halt('CANCELLED', '操作已暂停或停止')); return; }
-    let settled = false, request: { abort?: () => void } | undefined;
-    const cleanup = () => signal.removeEventListener('abort', abort);
+    let settled = false, request: { abort?: () => void } | undefined, timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => { if (timer !== undefined) clearTimeout(timer); signal.removeEventListener('abort', abort); };
     const done = (fn: () => void) => { if (settled) return; settled = true; cleanup(); fn(); };
     const abort = () => { try { request?.abort?.(); } catch { /* ignore */ } done(() => reject(new Halt('CANCELLED', '操作已暂停或停止'))); };
+    // A manager-provided timeout is advisory; enforce it here so a hung request can never
+    // freeze a run indefinitely.
+    timer = setTimeout(() => {
+      try { request?.abort?.(); } catch { /* ignore */ }
+      done(() => reject(new Halt('API_TIMEOUT', 'API 请求超时（脚本管理器未在规定时间内返回）')));
+    }, timeout);
     request = gm({
       method: options.method || 'POST', url: options.url, headers: options.headers, data: options.data,
       responseType: options.responseType || 'text', timeout,
@@ -79,6 +85,13 @@ function parseJsonObject(text: string): unknown {
   if (start < 0 || end <= start) throw new Halt('AI_RESPONSE', 'AI 返回内容中没有 JSON 对象');
   try { return JSON.parse(clean.slice(start, end + 1)); }
   catch { throw new Halt('AI_RESPONSE', 'AI 返回的 JSON 无法解析'); }
+}
+
+function encodeBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let index = 0; index < bytes.length; index++) binary += String.fromCharCode(bytes[index]);
+  return btoa(binary);
 }
 
 function decodeBase64(value: string): ArrayBuffer {
@@ -134,6 +147,23 @@ export async function answerWithAi(prompt: string, settings: Settings, signal: A
 
 export async function transcribeAudio(audio: ArrayBuffer, filename: string, settings: Settings, signal: AbortSignal): Promise<string> {
   if (!settings.asrApiKey.trim()) throw new Halt('ASR_CONFIG', '听力题需要 ASR：请在面板填写 ASR API Key');
+  // MiMo serves ASR through Chat Completions with an input_audio part; OpenAI-compatible
+  // providers use the multipart /audio/transcriptions endpoint instead.
+  const mimo = /mimo/i.test(settings.asrModel) || /xiaomimimo\.com/i.test(settings.asrApiBase);
+  if (mimo) {
+    const format = (/\.(mp3|wav|m4a|aac)(?:\?|$)/i.exec(filename)?.[1] || 'mp3').toLowerCase();
+    const response = await request({ url: endpoint(settings.asrApiBase, '/chat/completions'),
+      headers: authHeaders(settings.asrApiKey),
+      data: JSON.stringify({ model: settings.asrModel, stream: false, messages: [{ role: 'user', content: [
+        { type: 'input_audio', input_audio: { data: encodeBase64(audio), format } }] }] }) }, settings, signal);
+    const parsed = contentObject(JSON.parse(response.responseText || '{}'));
+    const choice = contentObject(Array.isArray(parsed.choices) ? parsed.choices[0] : {});
+    const content = contentObject(choice.message).content;
+    const text = typeof content === 'string' ? content : Array.isArray(content) ?
+      content.map(part => typeof contentObject(part).text === 'string' ? String(contentObject(part).text) : '').join('') : '';
+    if (!text.trim()) throw new Halt('ASR_RESPONSE', 'MiMo ASR 没有返回转写文本');
+    return text.trim();
+  }
   const form = new FormData();
   form.append('file', new Blob([audio], { type: 'audio/mpeg' }), filename);
   form.append('model', settings.asrModel);

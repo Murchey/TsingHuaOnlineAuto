@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LegacyAdapter, legacyRoute } from '../src/legacy-adapter';
-import { legacyData } from '../src/legacy-data';
+import { legacyData, scriptFillAnswers } from '../src/legacy-data';
 import { planTasks, hasCompleteResponse } from '../src/answers';
 import { Controller } from '../src/controller';
 import { Store } from '../src/storage';
@@ -39,6 +39,38 @@ function fixture(saved = false) {
   const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: root.firstElementChild as HTMLElement, component: leaf }]);
   return { adapter, server, c, leaf, submit, changes, root, unit: adapter.discover()[0] };
 }
+
+const exercise19 = () => ({ id: 'q-19', type: 19, contentString: 'Listen to the conversation again. Fill in the blanks with the information you hear.',
+  audio: 'audio-19', audioName: 'B2U1R1.mp3',
+  dialogueContents: [
+    { role: 'Adrian', content: { paragraphs: [{ contentItems: [
+      { type: 1, text: 'Hey, Kris! I’ve noticed ' }, { type: 2, id: 'b-1', group: 1 }, { type: 1, text: '. Why do you like it?' }] }] } },
+    { role: 'Kris', content: { paragraphs: [{ contentItems: [
+      { type: 1, text: 'I hate to be indoors all the time. And ' }, { type: 2, id: 'b-2', group: 2 }, { type: 1, text: '.' }] }] } },
+    { role: 'Kris', content: { paragraphs: [{ contentItems: [
+      { type: 1, text: 'Me neither! ' }, { type: 2, id: 'b-3', group: 3 },
+      { type: 1, text: '. I make sure I use the right equipment, follow safety protocols, and ' },
+      { type: 2, id: 'b-4', group: 4 }, { type: 1, text: '.' }] }] } },
+    { role: 'Kris', content: { paragraphs: [{ contentItems: [
+      { type: 1, text: 'Yes, and ' }, { type: 2, id: 'b-5', group: 5 }, { type: 1, text: '.' }] }] } },
+    { role: 'Adrian', content: { paragraphs: [{ contentItems: [
+      { type: 1, text: 'So ' }, { type: 2, id: 'b-6', group: 6 }, { type: 1, text: '!' }] }] } },
+  ],
+  fillBlanks: ['b-1', 'b-2', 'b-3', 'b-4', 'b-5', 'b-6'].map((id, index) => ({ id, group: index + 1, answer: '', standardAnswer: '' })),
+  audioScript: "<p><strong>Adrian:</strong>&nbsp;Hey, Kris! I've noticed you are really passionate about rock climbing. Why do you like it?</p>" +
+    "<p><strong>Kris:</strong>&nbsp;I hate to be indoors all the time. And rock climbing is such an exciting and challenging sport for me.</p>" +
+    "<p><strong>Kris:</strong>&nbsp;Me neither! That's why safety is always a top priority. I make sure I use the right equipment, follow safety protocols, and climb with experienced partners.</p>" +
+    "<p><strong>Kris:</strong>&nbsp;Yes, and it costs a lot of money.</p>" +
+    "<p><strong>Adrian:</strong>&nbsp;So it’s expensive and dangerous!</p>" });
+
+const exercise11 = () => ({ id: 'q-11', type: 11, contentString: 'Match each sport to the correct place in the diagram. Drag and drop.', ifDigi: true,
+  drag: [
+    { id: 't-ind', content: 'Individual Sports', styleContent: { paragraphs: [{ contentItems: [{ text: 'Individual Sports' }] }] } },
+    { id: 't-team', content: 'Team Sports', styleContent: { paragraphs: [{ contentItems: [{ text: 'Team Sports' }] }] } },
+    { id: 't-both', content: 'Individual Sports & Team Sports', styleContent: { paragraphs: [{ contentItems: [{ text: 'Individual Sports & Team Sports' }] }] } },
+  ],
+  dragged: ['baseball', 'badminton', 'skiing', 'swimming'].map((text, index) => ({ id: 'i-' + index, content: text,
+    styleContent: { paragraphs: [{ contentItems: [{ text }] }] } })) });
 
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); history.replaceState({}, '', path); });
 afterEach(() => vi.unstubAllGlobals());
@@ -81,6 +113,12 @@ describe('legacy production route regression', () => {
       'sent-1': { recordAudio: 'audio-1' }, 'sent-2': { recordAudio: 'audio-2' }, 'sent-3': { recordAudio: 'audio-3' },
     } } });
     expect(hasCompleteResponse(bothRoles.questionVOList[0], bothRoles.questionAnswerItemVOList![0].userAnswer)).toBe(true);
+  });
+  it('passes a composite listening script to its child questions', () => {
+    const data = legacyData({ exercise: { id: 'q-15', type: 15, audioScript: '<p>Script text</p>',
+      exerciseList: [{ id: 'c-1', type: 3, fillBlanks: [{ id: 'blank-a', answer: 'x' }] }] }, submitNum: 0 });
+    const child = data.questionVOList[0].children![0];
+    expect((child.extension as any).audioScript).toBe('Script text');
   });
   it('plans oral-brief type 8 as recording instead of writing', () => {
     const exercise8 = { id: 'oral-8', type: 8, contentString: 'Talk about your favorite sport.', answer: '' };
@@ -369,6 +407,150 @@ describe('legacy production route regression', () => {
     expect(c.doRecord.answer).toBe('vod-audio-id'); expect(c.doRecord.ossOrVod).toBe(2);
     expect(value).toEqual({ audio: 'vod-audio-id' });
   });
+  it('fills type 20 questions-answers textarea and updates doRecord.answer', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-questions-answers-exercise-cs-study><textarea></textarea></lib-questions-answers-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const exercise20: any = { id: 'q20', type: 20, contentString: 'Why do you like it?', answer: '' };
+    const changes = vi.fn();
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise20, pageTitle: 'Q&A',
+      doRecord: { type: 20, score: 0, answer: '' }, loadDoRecord() {}, doRecordChange: { emit: changes },
+      dataChange() { changes(this.doRecord); } };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
+    const unit = adapter.discover()[0];
+    const data = legacyData({ exercise: exercise20, submitNum: 0, doRecord: c.doRecord });
+    const task = planTasks(data, { allowMissing: true })[0];
+    expect(task.kind).toBe('writing');
+    vi.mocked(answerWithAi).mockResolvedValue({ answer: 'Because it is exciting and healthy.' });
+    const settings = { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' };
+    const value = await adapter.fill(unit, task, settings, signal());
+    expect(host.querySelector('textarea')!.value).toBe('Because it is exciting and healthy.');
+    expect(c.doRecord.answer).toBe('Because it is exciting and healthy.');
+    expect(value).toEqual({ answer: 'Because it is exciting and healthy.', annex: [] });
+  });
+  it('restores type 19 dialogue blanks from the official audio script', () => {
+    const data = legacyData({ exercise: exercise19(), submitNum: 0 });
+    const question = data.questionVOList[0];
+    expect(question.type).toBe('fill_base');
+    expect((question.extension as any).legacyType).toBe(19);
+    const plan = planTasks(data, { allowMissing: true })[0];
+    expect(plan.kind).toBe('fill');
+    expect((plan.value as any[]).map(v => v.idx)).toEqual(['b-1', 'b-2', 'b-3', 'b-4', 'b-5', 'b-6']);
+    expect(scriptFillAnswers(question)).toEqual([
+      { idx: 'b-1', answer: 'you are really passionate about rock climbing' },
+      { idx: 'b-2', answer: 'rock climbing is such an exciting and challenging sport for me' },
+      { idx: 'b-3', answer: "That's why safety is always a top priority" },
+      { idx: 'b-4', answer: 'climb with experienced partners' },
+      { idx: 'b-5', answer: 'it costs a lot of money' },
+      { idx: 'b-6', answer: 'it’s expensive and dangerous' },
+    ]);
+    expect(() => planTasks(data)).toThrow('答案');
+    expect(hasCompleteResponse(question, scriptFillAnswers(question))).toBe(true);
+    const saved = legacyData({ exercise: exercise19(), submitNum: 1,
+      doRecord: { type: 19, answer: Object.fromEntries(scriptFillAnswers(question)!.map(a => [a.idx, { id: a.idx, score: 2, content: a.answer }])) } });
+    expect(hasCompleteResponse(saved.questionVOList[0], saved.questionAnswerItemVOList![0].userAnswer)).toBe(true);
+  });
+  it('fills type 19 dialogue blanks and reopens a stale read-only page', async () => {
+    const exercise = exercise19();
+    document.body.innerHTML = '<app-course-task-stu><lib-fill-blank-dialogue-exercise-cs-study>' +
+      exercise.fillBlanks.map(b => '<span contenteditable="true" id="a-' + b.id + '"></span>').join('') +
+      '</lib-fill-blank-dialogue-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const doRecord: any = { type: 19, answer: {} };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 0, data: { isVisiable: 1 }, exercise, pageTitle: 'Dialogue',
+      doRecord, isEmptyDoRecord: true, loadDoRecord() { setTimeout(() => { c.exerciseStatus = 1; c.doRecord = { type: 19, answer: {} }; }, 0); },
+      retry() { c.exerciseStatus = 1; c.doRecord = { type: 19, answer: {} }; } };
+    const leaf: any = { status: 1, exercise, doRecord: c.doRecord, doRecordChange: { emit: vi.fn() } };
+    for (const span of host.querySelectorAll<HTMLElement>('[contenteditable="true"]')) {
+      span.addEventListener('input', () => {
+        const id = span.id.slice(2);
+        if (!leaf.doRecord.answer[id]) leaf.doRecord.answer[id] = { id };
+        leaf.doRecord.answer[id].content = span.innerText;
+      });
+    }
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockClear();
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(c.exerciseStatus).toBe(1);
+    expect(host.querySelector<HTMLElement>('#a-b-3')!.innerText).toBe("That's why safety is always a top priority");
+    expect(value).toHaveLength(6);
+    expect(answerWithAi).not.toHaveBeenCalled();
+  });
+  it('asks AI for type 19 blanks only when the audio script cannot resolve them', async () => {
+    const exercise = exercise19();
+    exercise.audioScript = '';
+    delete (exercise as any).audio;
+    document.body.innerHTML = '<app-course-task-stu><lib-fill-blank-dialogue-exercise-cs-study>' +
+      exercise.fillBlanks.map(b => '<span contenteditable="true" id="a-' + b.id + '"></span>').join('') +
+      '</lib-fill-blank-dialogue-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Dialogue',
+      doRecord: { type: 19, answer: {} }, loadDoRecord() {} };
+    const leaf: any = { status: 1, exercise, doRecord: c.doRecord, doRecordChange: { emit: vi.fn() } };
+    for (const span of host.querySelectorAll<HTMLElement>('[contenteditable="true"]')) {
+      span.addEventListener('input', () => {
+        const id = span.id.slice(2);
+        if (!leaf.doRecord.answer[id]) leaf.doRecord.answer[id] = { id };
+        leaf.doRecord.answer[id].content = span.innerText;
+      });
+    }
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ fill: exercise.fillBlanks.map(b => ({ idx: b.id, answer: 'answer ' + b.id })) });
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(answerWithAi).toHaveBeenCalledTimes(1);
+    expect(value).toHaveLength(6);
+  });
+  it('plans legacy type 11 as a many-to-many classification with AI fill', async () => {
+    const data = legacyData({ exercise: exercise11(), submitNum: 0 });
+    const question = data.questionVOList[0];
+    expect(question.type).toBe('legacy_11');
+    const plan = planTasks(data, { allowMissing: true })[0];
+    expect(plan.kind).toBe('fill');
+    expect((plan.value as any[]).map(g => g.idx)).toEqual(['t-ind', 't-team', 't-both']);
+    const complete = [{ idx: 't-ind', answers: ['i-2'] }, { idx: 't-team', answers: ['i-0'] },
+      { idx: 't-both', answers: ['i-1', 'i-3'] }];
+    expect(hasCompleteResponse(question, complete)).toBe(true);
+    expect(hasCompleteResponse(question, complete.map(g => g.idx === 't-both' ? { ...g, answers: ['i-1'] } : g))).toBe(false);
+    expect(hasCompleteResponse(question, [{ idx: 't-ind', answers: ['i-2', 'i-2'] }])).toBe(false);
+  });
+  it('drags each AI-classified item into its target and confirms the record', async () => {
+    const exercise = exercise11();
+    document.body.innerHTML = '<app-course-task-stu><lib-drag-drop-many-exercise-cs-study>' +
+      exercise.dragged.map(i => '<div class="' + i.id + '"></div>').join('') +
+      '</lib-drag-drop-many-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const changes = vi.fn();
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Classify',
+      doRecord: { type: 11, answer: {} }, loadDoRecord() {}, doRecordChange: { emit: changes } };
+    const leaf: any = { status: 1, exercise, doRecord: c.doRecord, doRecordChange: { emit: changes },
+      drag(event: any) {
+        const target = this.doRecord.answer[event.container.id] ||= { id: event.container.id, choiceIds: [], score: 0 };
+        target.choiceIds.push(event.previousContainer.id); changes(this.doRecord);
+      }, answerChange() { changes(this.doRecord); } };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ fill: [
+      { idx: 't-ind', answers: ['i-2'] }, { idx: 't-team', answers: ['i-0'] },
+      { idx: 't-both', answers: ['i-1', 'i-3'] },
+    ] });
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('待分类项'), expect.anything(), expect.anything());
+    expect(leaf.doRecord.answer['t-both'].choiceIds).toEqual(['i-1', 'i-3']);
+    expect(value).toEqual([{ idx: 't-ind', answers: ['i-2'] }, { idx: 't-team', answers: ['i-0'] },
+      { idx: 't-both', answers: ['i-1', 'i-3'] }]);
+  });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());
     await controller.start(f.unit, { ...defaults, intervalMs: 0 });
@@ -421,6 +603,24 @@ describe('legacy production route regression', () => {
     document.body.insertAdjacentHTML('beforeend',
       '<div class="ant-modal-wrap" style="display:block;visibility:visible"><div class="ant-modal">闯关失败！本次成绩：55分</div></div>');
     await expect(f.adapter.next(f.unit, signal())).rejects.toThrow('目标闯关未通过');
+  });
+  it('clicks Rechallenge, clears checkpoints, and returns the first unit of the retried goal', async () => {
+    const f = fixture();
+    const root2 = document.createElement('app-course-task-stu');
+    const c2: any = { courseId: 20, pageId: 'page-2', loadDoRecord() {} };
+    const modal = document.createElement('div');
+    modal.className = 'ant-modal-wrap';
+    modal.style.display = 'block';
+    modal.innerHTML = '<div class="ant-modal">闯关失败！本次成绩：55分<button>Rechallenge</button></div>';
+    document.body.append(modal);
+    const before = vi.fn();
+    modal.querySelector('button')!.addEventListener('click', () => { f.root.remove(); modal.remove(); document.body.append(root2); });
+    const adapter = new LegacyAdapter(() => [{ root: f.root, component: f.c }, { root: f.root.firstElementChild as HTMLElement, component: f.leaf },
+      { root: root2, component: c2 }]);
+    const unit = adapter.discover()[0];
+    const next = await adapter.next(unit, signal(), { ...defaults, autoRechallenge: true }, before);
+    expect(before).toHaveBeenCalledTimes(1);
+    expect(next?.contentId).toBe('page-2');
   });
   it('refuses a closed course and stale exercise blocks', () => {
     const f = fixture(); f.c.status = 0;

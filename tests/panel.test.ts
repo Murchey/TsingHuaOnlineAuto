@@ -6,7 +6,7 @@ import { Store } from '../src/storage';
 import { choice, data, mountPage } from './fixtures';
 
 let panel: Panel | undefined;
-beforeEach(() => { localStorage.clear(); document.body.innerHTML = ''; });
+beforeEach(() => { localStorage.clear(); sessionStorage.clear(); document.body.innerHTML = ''; });
 afterEach(() => { panel?.dispose(); panel = undefined; vi.restoreAllMocks(); });
 const make = () => {
   const a = new TsinghuaAdapter(), s = new Store(), c = new Controller(a, s);
@@ -21,6 +21,7 @@ describe('independent panel lifecycle', () => {
     expect(shadow.getElementById('message')?.textContent).toContain('助手已运行');
     expect((shadow.getElementById('rolePlayMode') as HTMLSelectElement).value).toBe('original');
     expect((shadow.getElementById('continuous') as HTMLInputElement).checked).toBe(true);
+    expect((shadow.getElementById('autoRechallenge') as HTMLInputElement).checked).toBe(true);
     expect((shadow.getElementById('ttsProvider') as HTMLSelectElement).value).toBe('mimo');
     expect(shadow.getElementById('aiApiBase')).not.toBeNull();
     expect(shadow.getElementById('asrApiBase')).not.toBeNull();
@@ -50,6 +51,17 @@ describe('independent panel lifecycle', () => {
   it('puts errors in text nodes so a message cannot inject markup', () => {
     const { controller, shadow } = make(); controller.report('ERROR', '<img src=x onerror=alert(1)>', true);
     expect(shadow.querySelector('img')).toBeNull(); expect(shadow.getElementById('message')?.textContent).toContain('<img');
+  });
+  it('continues automatically after the controller requests a page reload', async () => {
+    mountPage(data(choice));
+    const adapter = new TsinghuaAdapter(), store = new Store();
+    store.requestResume();
+    const controller = new Controller(adapter, store, async (_key, job) => job());
+    const start = vi.spyOn(controller, 'start').mockResolvedValue(undefined);
+    panel = new Panel(controller, adapter, store); panel.mount();
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    expect(start.mock.calls[0][0].key).toContain('student_course');
+    expect(store.takeResume()).toBe(false);
   });
   it('does not create a second controller or panel on repeated script injection', async () => {
     vi.resetModules(); await import('../src/main');

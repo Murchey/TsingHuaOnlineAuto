@@ -12,6 +12,6 @@ export class AdaptiveAdapter implements Adapter {
   fill(unit: Unit, task: Task, settings: Settings, signal: AbortSignal) { return this.active.fill(unit, task, settings, signal); }
   record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal) { return this.active.record(unit, task, settings, signal); }
   submit(unit: Unit, signal: AbortSignal) { return this.active.submit(unit, signal); }
-  next(unit: Unit, signal: AbortSignal) { return this.active.next?.(unit, signal) || Promise.resolve(undefined); }
+  next(unit: Unit, signal: AbortSignal, settings?: Settings, beforeRechallenge?: () => void) { return this.active.next?.(unit, signal, settings, beforeRechallenge) || Promise.resolve(undefined); }
   conflict() { return this.active.conflict(); }
 }

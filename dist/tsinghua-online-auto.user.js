@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.1
+// @version      0.3.2
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -21,6 +21,7 @@
   var defaults = {
     allLoaded: false,
     continuous: true,
+    autoRechallenge: true,
     recordingSeconds: 10,
     rolePlayAudioMode: "original",
     aiAnswers: false,
@@ -152,6 +153,11 @@
       }
       return { question: q, kind: "choice", value: q.type === "choice_multiple" ? values : values[0] };
     }
+    if (q.type === "legacy_11") {
+      const targets = object(q.extension).targets;
+      if (!Array.isArray(targets) || !targets.length) throw new Halt("DATA_SHAPE", `分类题 ${q.id} 的目标缺失`);
+      return { question: q, kind: "fill", value: targets.map((target) => ({ idx: String(object(target).id), answers: [] })) };
+    }
     if (q.type === "fill_base") {
       const doc = new DOMParser().parseFromString(q.stem || "", "text/html");
       const ids = [...doc.querySelectorAll("span.zty-exercise-item-fill-blank[id]")].map((el) => el.id);
@@ -220,6 +226,10 @@
   function canonical(q, value) {
     const v = q.type === "choice_single" || q.type === "judge_basic" ? value : parse(value);
     if (q.type === "choice_multiple") return Array.isArray(v) ? [...v].sort() : v;
+    if (q.type === "legacy_11") return Array.isArray(v) ? v.map(object).map((group) => ({
+      idx: group.idx,
+      answers: Array.isArray(group.answers) ? group.answers.map(String).sort() : []
+    })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type === "fill_base") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type.startsWith("essay_")) return { answer: String(object(v).answer ?? "").replace(/\r\n/g, "\n").trim() };
     if (q.type === "oral_simple_speak" || q.type === "legacy_8") return { audio: audioId(object(v).audio) };
@@ -268,6 +278,21 @@
       if (answeredIds.size !== answers.length || [...answeredIds].some((idx) => !itemById.has(idx))) return false;
       const expected = items.filter((item) => String(object(item).roleId ?? "") === roleId);
       return expected.length > 0 && expected.every((item) => answeredIds.has(String(object(item).idx)));
+    }
+    if (q.type === "legacy_11") {
+      const items = object(q.extension).items;
+      const ids = new Set((Array.isArray(items) ? items : []).map((item) => String(object(item).id)));
+      if (!ids.size || !Array.isArray(v)) return false;
+      const seen = /* @__PURE__ */ new Set();
+      for (const group of v.map(object)) {
+        const answers = Array.isArray(group.answers) ? group.answers.map(String) : [];
+        if (!answers.length) return false;
+        for (const id2 of answers) {
+          if (!ids.has(id2) || seen.has(id2)) return false;
+          seen.add(id2);
+        }
+      }
+      return seen.size === ids.size;
     }
     if (q.type === "fill_base" || q.type === "oral_follow_along" || q.type === "oral_vocabulary_learning") {
       const ext = parse(q.extension);
@@ -738,8 +763,11 @@
         reject(new Halt("CANCELLED", "操作已暂停或停止"));
         return;
       }
-      let settled = false, request2;
-      const cleanup = () => signal.removeEventListener("abort", abort);
+      let settled = false, request2, timer;
+      const cleanup = () => {
+        if (timer !== void 0) clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+      };
       const done = (fn) => {
         if (settled) return;
         settled = true;
@@ -753,6 +781,13 @@
         }
         done(() => reject(new Halt("CANCELLED", "操作已暂停或停止")));
       };
+      timer = setTimeout(() => {
+        try {
+          request2?.abort?.();
+        } catch {
+        }
+        done(() => reject(new Halt("API_TIMEOUT", "API 请求超时（脚本管理器未在规定时间内返回）")));
+      }, timeout);
       request2 = gm({
         method: options.method || "POST",
         url: options.url,
@@ -797,6 +832,12 @@
     } catch {
       throw new Halt("AI_RESPONSE", "AI 返回的 JSON 无法解析");
     }
+  }
+  function encodeBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let index = 0; index < bytes.length; index++) binary += String.fromCharCode(bytes[index]);
+    return btoa(binary);
   }
   function decodeBase64(value) {
     const clean = value.replace(/^data:[^,]*,/i, "").replace(/\s+/g, "");
@@ -864,6 +905,23 @@
   }
   async function transcribeAudio(audio, filename, settings, signal) {
     if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "听力题需要 ASR：请在面板填写 ASR API Key");
+    const mimo = /mimo/i.test(settings.asrModel) || /xiaomimimo\.com/i.test(settings.asrApiBase);
+    if (mimo) {
+      const format = (/\.(mp3|wav|m4a|aac)(?:\?|$)/i.exec(filename)?.[1] || "mp3").toLowerCase();
+      const response2 = await request({
+        url: endpoint(settings.asrApiBase, "/chat/completions"),
+        headers: authHeaders(settings.asrApiKey),
+        data: JSON.stringify({ model: settings.asrModel, stream: false, messages: [{ role: "user", content: [
+          { type: "input_audio", input_audio: { data: encodeBase64(audio), format } }
+        ] }] })
+      }, settings, signal);
+      const parsed2 = contentObject(JSON.parse(response2.responseText || "{}"));
+      const choice = contentObject(Array.isArray(parsed2.choices) ? parsed2.choices[0] : {});
+      const content = contentObject(choice.message).content;
+      const text3 = typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => typeof contentObject(part).text === "string" ? String(contentObject(part).text) : "").join("") : "";
+      if (!text3.trim()) throw new Halt("ASR_RESPONSE", "MiMo ASR 没有返回转写文本");
+      return text3.trim();
+    }
     const form = new FormData();
     form.append("file", new Blob([audio], { type: "audio/mpeg" }), filename);
     form.append("model", settings.asrModel);
@@ -930,7 +988,15 @@
     const audio = collectAudioIds(e);
     if (audio.length) q.audio = audio;
     if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
-      q.children = e.exerciseList.map(legacyQuestion);
+      const parentScript = text(typeof e.audioScript === "string" ? e.audioScript : "");
+      q.children = e.exerciseList.map((child) => {
+        const question = legacyQuestion(child);
+        const ext = object(question.extension);
+        if (parentScript && question.extension && !Array.isArray(question.extension)) {
+          question.extension = { ...ext, audioScript: parentScript };
+        }
+        return question;
+      });
       return q;
     }
     if (type === 1 || type === 2) {
@@ -970,8 +1036,42 @@
           text: richText(object(s).styleText ?? object(s).text ?? object(s).content)
         }))
       };
+    } else if (type === 11) {
+      const targets = arrayField(e, "drag").map((value) => {
+        const target = object(value);
+        return { id: String(target.id ?? ""), text: richText(target.styleContent) || String(target.content ?? "") };
+      });
+      const items = arrayField(e, "dragged").map((value) => {
+        const item = object(value);
+        return { id: String(item.id ?? ""), text: richText(item.styleContent) || String(item.content ?? "") };
+      });
+      if (!targets.length || targets.some((t) => !t.id) || !items.length || items.some((i) => !i.id)) {
+        throw new Halt("DATA_SHAPE", "旧版分类拖拽题的目标或选项缺失");
+      }
+      q.type = "legacy_11";
+      q.extension = { legacyType: 11, targets, items };
+    } else if (type === 19) {
+      q.type = "fill_base";
+      const blanks = Array.isArray(e.fillBlanks) ? e.fillBlanks.map(object) : [];
+      if (!blanks.length || blanks.some((b) => typeof b.id !== "string" || !/^[\w-]+$/.test(b.id))) {
+        throw new Halt("DATA_SHAPE", "旧版对话填空标识格式异常");
+      }
+      const parsed = dialogueData(e);
+      q.stem = blanks.map((b) => '<span class="zty-exercise-item-fill-blank" id="' + String(b.id) + '"></span>').join("");
+      q.answer = blanks.map((b) => {
+        const plain = typeof b.answer === "string" ? b.answer : "";
+        const standard = typeof b.standardAnswer === "string" ? b.standardAnswer : "";
+        return { idx: b.id, val: plain || standard };
+      });
+      q.extension = {
+        legacyType: 19,
+        dialogue: parsed.items,
+        blanks: parsed.blanks,
+        audioScript: text(typeof e.audioScript === "string" ? e.audioScript : "")
+      };
     } else if (type === 20) {
-      q.type = "oral_simple_speak";
+      q.type = "essay_questions_answers";
+      q.answer = text(e.answer);
     }
     return q;
   }
@@ -1043,7 +1143,85 @@
     }
     return chunks.join(" ").trim();
   }
+  function dialogueData(e) {
+    const items = [], blanks = [];
+    for (const raw of arrayField(e, "dialogueContents")) {
+      const dialogue = object(raw), parts = [];
+      const paragraphs = Array.isArray(object(dialogue.content).paragraphs) ? object(dialogue.content).paragraphs : [];
+      for (const paragraph of paragraphs) {
+        const contentItems = Array.isArray(object(paragraph).contentItems) ? object(paragraph).contentItems : [];
+        for (let index = 0; index < contentItems.length; index++) {
+          const item = object(contentItems[index]);
+          if (Number(item.type) === 2) {
+            const idx = typeof item.id === "string" ? item.id : "";
+            if (!idx) continue;
+            const before = object(contentItems[index - 1]).text, after = object(contentItems[index + 1]).text;
+            blanks.push({
+              idx,
+              before: typeof before === "string" ? before : "",
+              after: typeof after === "string" ? after : ""
+            });
+            parts.push("[[" + idx + "]]");
+          } else if (typeof item.text === "string") parts.push(item.text);
+        }
+      }
+      items.push({ role: String(dialogue.role ?? ""), text: parts.join("") });
+    }
+    return { items, blanks };
+  }
+  function normalizeText(value) {
+    let out = "";
+    const map = [];
+    let space = false;
+    for (let index = 0; index < value.length; index++) {
+      let ch = value[index];
+      if (/[‘’]/.test(ch)) ch = "'";
+      else if (/[“”]/.test(ch)) ch = '"';
+      else if (/[‐-―]/.test(ch)) ch = "-";
+      else if (ch === " ") ch = " ";
+      if (/\s/.test(ch)) {
+        if (space) continue;
+        ch = " ";
+        space = true;
+      } else space = false;
+      for (const piece of ch.toLowerCase()) {
+        out += piece;
+        map.push(index);
+      }
+    }
+    return { text: out, map };
+  }
+  function scriptFillAnswers(q) {
+    const ext = object(q.extension);
+    const script = typeof ext.audioScript === "string" ? ext.audioScript : "";
+    const blanks = Array.isArray(ext.blanks) ? ext.blanks.map(object) : [];
+    if (!script || !blanks.length) return null;
+    const source = normalizeText(script), answers = [];
+    for (const blank of blanks) {
+      const idx = typeof blank.idx === "string" ? blank.idx : "";
+      const before = typeof blank.before === "string" ? blank.before : "";
+      const after = typeof blank.after === "string" ? blank.after : "";
+      const prefix2 = normalizeText(before), suffix = normalizeText(after);
+      if (!idx) return null;
+      const from = prefix2.text ? source.text.indexOf(prefix2.text) : 0;
+      if (from < 0) return null;
+      const start = from + prefix2.text.length;
+      const end = suffix.text ? source.text.indexOf(suffix.text, start) : source.text.length;
+      if (end < 0 || end <= start) return null;
+      const answer = script.slice(source.map[start] ?? script.length, source.map[end] ?? script.length);
+      const cleaned = answer.replace(/^[\s:：,，.。;；!！?？]+|[\s:：,，.。;；!！?？]+$/g, "");
+      if (!cleaned) return null;
+      answers.push({ idx, answer: cleaned });
+    }
+    return answers.length === blanks.length ? answers : null;
+  }
   function legacyValue(q, record) {
+    if (q.type === "legacy_11") {
+      return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
+        idx,
+        answers: Array.isArray(object(value).choiceIds) ? object(value).choiceIds.map(String) : []
+      }));
+    }
     const a = object(record).answer;
     if (q.type === "fill_base") return Object.entries(object(a)).map(([idx, v]) => ({
       idx,
@@ -1084,6 +1262,7 @@
     constructor(components2 = legacyComponents) {
       this.components = components2;
     }
+    rechallengeCounts = /* @__PURE__ */ new Map();
     discover() {
       if (!legacyRoute()) return [];
       return this.components().filter(({ component: c, root }) => root.matches("app-course-task-stu") && shown(root) && root.isConnected && typeof c.loadDoRecord === "function" && /^[\w-]+$/.test(String(c.pageId || ""))).map(({ component: c, root }) => ({
@@ -1190,7 +1369,8 @@
     }
     async fill(unit, task, settings, signal) {
       check(signal);
-      const { component: c, root } = this.leaf(unit, task);
+      await this.ready(unit, signal);
+      const { component: c, root } = await this.leafOrReload(unit, task, signal);
       task = await this.aiTask(task, root, c, settings, signal);
       if (task.kind === "choice") {
         if (typeof c.answerChange !== "function") throw new Halt("QUESTION_DOM", "旧版选择题控件已变化");
@@ -1204,7 +1384,34 @@
         });
       } else if (task.kind === "fill") {
         const items = task.value;
-        if (c.exercise.type === 24) {
+        if (task.question.type === "legacy_11") {
+          if (typeof c.drag !== "function") throw new Halt("QUESTION_DOM", "分类拖拽控件已变化");
+          const groups = items.map((value) => {
+            const group = object(value);
+            return { idx: String(group.idx), answers: Array.isArray(group.answers) ? group.answers.map(String) : [] };
+          });
+          this.run(unit, () => {
+            const record = object(c.doRecord);
+            if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+            const answers = record.answer;
+            for (const group of groups) answers[group.idx] = { ...object(answers[group.idx]), id: group.idx, choiceIds: [], score: 0 };
+          });
+          const boxes = new Map(groups.flatMap((group) => group.answers).map((id2) => [
+            id2,
+            root.querySelector('[class~="' + id2 + '"]') ?? document.createElement("div")
+          ]));
+          this.run(unit, () => {
+            for (const group of groups) for (const id2 of group.answers) {
+              c.drag({
+                previousContainer: { id: id2, data: [] },
+                container: { id: group.idx, data: [] },
+                item: { element: { nativeElement: boxes.get(id2) } }
+              });
+            }
+            if (typeof c.answerChange === "function") c.answerChange();
+            else c.doRecordChange.emit(c.doRecord);
+          });
+        } else if (c.exercise.type === 24) {
           if (typeof c.drag !== "function" || typeof c.delAnswer !== "function") throw new Halt("QUESTION_DOM", "拖拽控件已变化");
           if (new Set(items.map((i) => i.answer)).size !== items.length) throw new Halt("AMBIGUOUS", "拖拽答案存在重复选项，已暂停");
           this.run(unit, () => {
@@ -1212,6 +1419,14 @@
             for (const { idx, answer } of items) c.drag({ previousContainer: { id: answer, data: {} }, container: { id: idx, data: {} } });
           });
         } else {
+          this.run(unit, () => {
+            const record = object(c.doRecord);
+            if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+            const answers = record.answer;
+            for (const { idx } of items) {
+              if (!answers[idx] || typeof answers[idx] !== "object") answers[idx] = { id: idx, score: 0, content: "" };
+            }
+          });
           const fields = items.map((item) => {
             const matches = [...root.querySelectorAll('[contenteditable="true"]')].filter((e) => e.id === `a-${item.idx}`);
             if (matches.length !== 1) throw new Halt("QUESTION_DOM", `填空 ${item.idx} 未找到唯一输入框`);
@@ -1220,7 +1435,7 @@
           for (const { item, field } of fields) {
             check(signal);
             field.focus();
-            field.innerText = item.answer;
+            field.innerText = item.answer ?? "";
             field.dispatchEvent(new Event("input", { bubbles: true }));
             field.blur();
           }
@@ -1228,11 +1443,18 @@
       } else if (task.kind === "writing") {
         const fields = root.querySelectorAll("textarea");
         if (fields.length !== 1) throw new Halt("QUESTION_DOM", "问答输入框不唯一或尚未加载");
-        const field = fields[0];
-        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(field, object(task.value).answer);
+        const field = fields[0], answer = object(task.value).answer;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(field, answer);
         field.dispatchEvent(new Event("input", { bubbles: true }));
         field.dispatchEvent(new Event("change", { bubbles: true }));
         field.blur();
+        if (String(c.doRecord.answer ?? "") !== String(answer)) {
+          this.run(unit, () => {
+            c.doRecord.answer = answer;
+            if (typeof c.dataChange === "function") c.dataChange();
+            else c.doRecordChange.emit(c.doRecord);
+          });
+        }
       }
       await sleep(80, signal);
       this.editable(unit);
@@ -1243,7 +1465,8 @@
       return actual;
     }
     async record(unit, task, settings, signal) {
-      const { component: c, root } = this.leaf(unit, task);
+      await this.ready(unit, signal);
+      const { component: c, root } = await this.leafOrReload(unit, task, signal);
       if (![8, 9, 18, 20].includes(Number(c.exercise.type))) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
       if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c);
       if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
@@ -1293,7 +1516,14 @@
       let answer = typeof q.answer === "string" ? q.answer.trim() : "";
       if (settings.aiAnswers) {
         if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "口语简答题需要 AI 生成回答，请填写 AI API Key");
-        const transcript = q.audio?.length && settings.asrApiKey.trim() ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : "";
+        let transcript = "";
+        if (q.audio?.length && settings.asrApiKey.trim()) {
+          try {
+            transcript = await this.transcribeQuestionAudio(c, q.audio, settings, signal);
+          } catch (error) {
+            if (error instanceof Halt && error.code === "CANCELLED") throw error;
+          }
+        }
         const prompt = `你是英语口语考试助手。请根据题目写一个自然、简洁、适合朗读的英语回答，2-4 句。只返回 JSON：{"answer":"..."}。
 题目: ${q.instruction || q.stem || ""}
 页面文本:
@@ -1562,27 +1792,124 @@ ${(q.stem || "").slice(0, 3e3)}
       if (!target.every(done)) throw new Halt("TTS_SCORE", "TTS 已处理，但网页未接收角色扮演作答，请导出诊断");
       return legacyValue(task.question, c.doRecord);
     }
+    // The legacy page sometimes renders before its own record request finishes, which
+    // leaves the exercise in the initial read-only state with no inputs. Re-run the
+    // site's own loader inside Angular's zone, then reopen an empty result record.
+    async ready(unit, signal) {
+      this.assertContext(unit);
+      const c = this.instance(unit);
+      if (Number(c.exerciseStatus) === 1) return c;
+      if (Number(c.exerciseStatus) === 0 && typeof c.loadDoRecord === "function") {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          runInLegacyZone(() => c.loadDoRecord());
+          try {
+            await until(() => Number(c.exerciseStatus) !== 0 ? true : void 0, 6e3, signal);
+            break;
+          } catch (error) {
+            if (signal.aborted || error instanceof Halt && error.code !== "PAGE_TIMEOUT") throw error;
+            if (attempt < 2) await sleep(1200, signal);
+          }
+        }
+      }
+      if (Number(c.exerciseStatus) === 0) {
+        throw new Halt("NEEDS_RELOAD", "练习作答控件未渲染（页面偶发空白，需要刷新）");
+      }
+      if (Number(c.exerciseStatus) === 2 && this.emptyRecord(c)) {
+        runInLegacyZone(() => {
+          if (typeof c.retry === "function") c.retry();
+          else {
+            c.exerciseStatus = 1;
+            c.doRecord = { type: c.exercise?.type };
+          }
+        });
+        await until(() => Number(c.exerciseStatus) === 1 ? true : void 0, 5e3, signal);
+      }
+      if (Number(c.exerciseStatus) !== 1) throw new Halt("READ_ONLY", "当前为已提交的结果页；保持现有结果，请手动选择待作答练习");
+      return c;
+    }
+    // A rendered-but-empty exercise may still lack its controls. One native reload of the
+    // record is cheap; if that fails the controller refreshes the page and resumes.
+    async leafOrReload(unit, task, signal) {
+      try {
+        return this.leaf(unit, task);
+      } catch (error) {
+        if (!(error instanceof Halt) || error.code !== "QUESTION_DOM") throw error;
+        const c = this.instance(unit);
+        if (String(c.exercise?.id ?? "") !== String(task.question.id)) throw error;
+        if (typeof c.loadDoRecord === "function") {
+          runInLegacyZone(() => c.loadDoRecord());
+          try {
+            await until(() => {
+              try {
+                this.leaf(unit, task);
+                return true;
+              } catch {
+                return void 0;
+              }
+            }, 4e3, signal);
+          } catch {
+            throw new Halt("NEEDS_RELOAD", "练习作答控件未渲染（页面偶发空白，需要刷新）");
+          }
+        }
+        return this.leaf(unit, task);
+      }
+    }
+    emptyRecord(c) {
+      if (c.isEmptyDoRecord === true) return true;
+      const record = object(c.doRecord), answers = record.answer;
+      if (answers == null) return true;
+      if (typeof answers === "string") return !answers.trim();
+      if (Array.isArray(answers)) return answers.length === 0;
+      const values = Object.values(object(answers));
+      if (!values.length) return true;
+      return values.every((value) => {
+        const entry = object(value);
+        const content = entry.content ?? entry.recordAudio ?? entry.choiceId ?? entry.answer;
+        if (typeof content === "string") return !content.trim();
+        if (Array.isArray(content)) return content.length === 0;
+        return content == null;
+      });
+    }
     async aiTask(task, root, c, settings, signal) {
+      const ext = object(task.question.extension);
+      if (task.kind === "fill" && Number(ext.legacyType) === 19) {
+        const scripted = scriptFillAnswers(task.question);
+        if (scripted) return { ...task, value: scripted };
+      }
       if (!settings.aiAnswers || task.kind === "recording") return task;
       if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "已启用 AI 答题，但未填写 AI API Key");
       const q = task.question;
-      const transcript = q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : "";
+      const script = typeof ext.audioScript === "string" ? ext.audioScript : "";
+      const dialogue = Array.isArray(ext.dialogue) ? ext.dialogue.map((line) => {
+        const entry = object(line);
+        return `${String(entry.role || "")}: ${String(entry.text || "")}`;
+      }) : [];
+      const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : "");
       const options = Array.isArray(q.extension) ? q.extension.map((option) => ({
         id: String(object(option).idx),
         text: text(object(option).val)
       })) : [];
       const blanks = Array.isArray(task.value) ? task.value.map(object).map((blank) => ({ idx: String(blank.idx) })) : [];
-      const schema = task.kind === "choice" ? '{"choice":["选项ID", ...]}' : task.kind === "fill" ? '{"fill":[{"idx":"空位ID","answer":"答案"}]}' : '{"answer":"完整答案文本"}';
+      const catalog = Number(ext.legacyType) === 11 ? {
+        targets: (Array.isArray(ext.targets) ? ext.targets : []).map((target) => ({ id: String(object(target).id), text: String(object(target).text ?? "") })),
+        items: (Array.isArray(ext.items) ? ext.items : []).map((item) => ({ id: String(object(item).id), text: String(object(item).text ?? "") }))
+      } : null;
+      const schema = task.kind === "choice" ? '{"choice":["选项ID", ...]}' : task.kind === "fill" ? Number(ext.legacyType) === 11 ? '{"fill":[{"idx":"目标ID","answers":["项目ID", ...]}]}' : '{"fill":[{"idx":"空位ID","answer":"答案"}]}' : '{"answer":"完整答案文本"}';
       const prompt = `你正在完成清华社英语旧版练习。只返回一个 JSON 对象，不要 Markdown。
 题型: ${q.type}（${task.kind}）
 题目说明: ${q.instruction || ""}
+对话（[[空位ID]] 为待填空格）: ${dialogue.length ? "\n" + dialogue.join("\n") : "（无）"}
 页面可见文本:
 ${(root.innerText || "").slice(0, 6e3)}
 选项: ${JSON.stringify(options)}
 空位: ${JSON.stringify(blanks)}
+${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
+待分类项: ${JSON.stringify(catalog.items)}` : ""}
 听力转写: ${transcript || "（无）"}
 返回格式: ${schema}
 ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空的 answer 必须使用选项中的 ID。" : ""}
+${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
+${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个目标，全部项目都要分配。" : ""}
 必须严格回答当前题目。`;
       const result = await answerWithAi(prompt, settings, signal);
       return { ...task, value: this.validateAiValue(task, result) };
@@ -1615,6 +1942,28 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
           throw new Halt("AI_ANSWER", "AI 返回的选项不符合当前选择题");
         }
         return q.type === "choice_multiple" ? selected : selected[0];
+      }
+      if (task.kind === "fill" && Number(object(q.extension).legacyType) === 11) {
+        const ext = object(q.extension);
+        const itemIds = new Set((Array.isArray(ext.items) ? ext.items : []).map((item) => String(object(item).id)));
+        const targets = Array.isArray(task.value) ? task.value.map(object) : [];
+        const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
+        const byId = new Map(fill.map((entry) => [
+          String(entry.idx),
+          Array.isArray(entry.answers) ? entry.answers.map(String) : []
+        ]));
+        const seen = /* @__PURE__ */ new Set();
+        const value2 = targets.map((target) => {
+          const idx = String(target.idx), answers = byId.get(idx) ?? [];
+          if (!answers.length) throw new Halt("AI_ANSWER", `AI 返回的分类目标 ${idx} 为空`);
+          for (const id2 of answers) {
+            if (!itemIds.has(id2) || seen.has(id2)) throw new Halt("AI_ANSWER", "AI 返回的分类项缺失、重复或不属于本题");
+            seen.add(id2);
+          }
+          return { idx, answers };
+        });
+        if (seen.size !== itemIds.size) throw new Halt("AI_ANSWER", "AI 返回的分类没有覆盖全部选项");
+        return value2;
       }
       if (task.kind === "fill") {
         const blanks = Array.isArray(task.value) ? task.value.map(object) : [];
@@ -1706,13 +2055,14 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
       const score = /本次成绩[:：]\s*(\d+)\s*分/.exec(found.text)?.[1];
       return `目标闯关未通过${score ? `（${score}分）` : ""}，请手动 Rechallenge 或调整答案后重试`;
     }
-    async next(unit, signal) {
+    async next(unit, signal, settings, beforeRechallenge) {
       check(signal);
       this.assertContext(unit);
       const failed = this.goalFailure();
-      if (failed) throw new Halt("GOAL_FAILED", failed);
+      if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
       const successModal = this.challengeModal();
       if (successModal && /闯关成功/.test(successModal.text)) {
+        this.rechallengeCounts.delete(unit.key);
         successModal.modal.querySelector(".ant-modal-close")?.click();
         await sleep(300, signal);
       }
@@ -1720,11 +2070,35 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
       if (!right || right.getAttribute("aria-disabled") === "true" || right.classList.contains("disabled")) return void 0;
       const oldKey = unit.key;
       right.click();
+      try {
+        await until(() => {
+          const failure2 = this.goalFailure();
+          if (failure2) throw new Halt("GOAL_FAILURE_DETECTED", failure2);
+          const found = this.discover()[0];
+          return found && found.key !== oldKey ? found : void 0;
+        }, 2e4, signal);
+      } catch (error) {
+        if (error instanceof Halt && error.code === "GOAL_FAILURE_DETECTED") {
+          return this.rechallenge(unit, signal, error.message, settings, beforeRechallenge);
+        }
+        throw error;
+      }
+      return this.discover()[0];
+    }
+    async rechallenge(unit, signal, reason, settings, beforeRechallenge) {
+      if (!settings?.autoRechallenge) throw new Halt("GOAL_FAILED", reason);
+      const count = (this.rechallengeCounts.get(unit.key) || 0) + 1;
+      if (count > 2) throw new Halt("GOAL_RETRY_LIMIT", `${reason}；已自动 Rechallenge 2 次，暂停`);
+      const modal = this.challengeModal();
+      if (!modal) throw new Halt("GOAL_FAILED", reason);
+      const again = [...modal.modal.querySelectorAll("button")].find((button) => /rechallenge/i.test(button.textContent || ""));
+      if (!again) throw new Halt("GOAL_FAILED", `${reason}；未找到 Rechallenge 按钮`);
+      this.rechallengeCounts.set(unit.key, count);
+      beforeRechallenge?.();
+      again.click();
       await until(() => {
-        const failure2 = this.goalFailure();
-        if (failure2) throw new Halt("GOAL_FAILED", failure2);
         const found = this.discover()[0];
-        return found && found.key !== oldKey ? found : void 0;
+        return found && found.key !== unit.key ? found : void 0;
       }, 2e4, signal);
       return this.discover()[0];
     }
@@ -1816,8 +2190,8 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
     submit(unit, signal) {
       return this.active.submit(unit, signal);
     }
-    next(unit, signal) {
-      return this.active.next?.(unit, signal) || Promise.resolve(void 0);
+    next(unit, signal, settings, beforeRechallenge) {
+      return this.active.next?.(unit, signal, settings, beforeRechallenge) || Promise.resolve(void 0);
     }
     conflict() {
       return this.active.conflict();
@@ -1842,10 +2216,11 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
     });
   }
   var Controller = class {
-    constructor(adapter, store, withLock = browserLock) {
+    constructor(adapter, store, withLock = browserLock, reload = () => location.reload()) {
       this.adapter = adapter;
       this.store = store;
       this.withLock = withLock;
+      this.reload = reload;
     }
     progress = {
       status: "idle",
@@ -1910,6 +2285,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
           let units = settings.allLoaded ? this.adapter.discover().filter((u) => u.catalogId === selected.catalogId) : [selected];
           if (!units.some((u) => u.key === selected.key)) throw new Halt("STALE_PAGE", "所选练习已离开页面");
           this.update({ unitsTotal: units.length });
+          const seen = new Set(units.map((entry) => entry.key));
           let index = 0;
           while (index < units.length) {
             const unit = units[index++];
@@ -1918,8 +2294,15 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
             await this.runUnit(unit, settings, signal);
             this.update({ unitsDone: this.progress.unitsDone + 1 });
             if (settings.continuous && this.adapter.next) {
-              const next = await this.adapter.next(unit, signal);
+              const next = await this.adapter.next(unit, signal, settings, () => {
+                this.store.clearCourse(unit.key);
+                seen.clear();
+              });
               if (next) {
+                if (seen.has(next.key)) {
+                  throw new Halt("PAGE_CYCLE", "练习在未 Rechallenge 的情况下回到已完成的页面，已停止以避免重复提交");
+                }
+                seen.add(next.key);
                 units.push(next);
                 this.update({ unitsTotal: units.length });
               }
@@ -1933,6 +2316,14 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
         if (signal.aborted) {
           const status = this.stopStatus;
           this.update({ status, message: status === "stopped" ? "已停止" : "已暂停，可继续重新核对" });
+        } else if (halt.code === "NEEDS_RELOAD") {
+          if (this.store.requestResume()) {
+            this.report("RELOAD", "页面作答控件未渲染，正在自动刷新并继续", true);
+            this.reload();
+          } else {
+            this.update({ status: "paused" });
+            this.report("RELOAD_LIMIT", `${halt.message}；已自动刷新 3 次仍未恢复，请手动刷新页面`, true);
+          }
         } else {
           this.update({ status: "paused" });
           this.report(halt.code, halt.message, true);
@@ -1951,16 +2342,25 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
           this.store.save({ ...old, phase: "verified", updatedAt: Date.now() });
           this.update({ completed: Object.keys(old.expected).length, total: Object.keys(old.expected).length });
           this.report("RECONCILED", "已核对服务器上的提交记录，跳过重复提交");
+          this.store.resetResume();
           return;
         }
         if (old.phase === "pending") {
           throw new Halt("PENDING_SUBMIT", "上次提交结果尚不能确认，已阻止再次提交；请在网页核查后重置本地记录");
         }
-        throw new Halt("RECORD_CHANGED", "服务器作答记录与本地记录不一致，请核查后重置本地记录");
+        const answered = leaves(data.questionVOList).some((question) => {
+          const record = (data.questionAnswerItemVOList || []).find((entry) => String(entry.questionId) === String(question.id));
+          return !!record && hasCompleteResponse(question, record.userAnswer);
+        });
+        if (answered || (data.answerCount || 0) <= 0) {
+          throw new Halt("RECORD_CHANGED", "服务器作答记录与本地记录不一致，请核查后重置本地记录");
+        }
+        this.store.clear(unit.key);
       }
       if (completedOnServer(data)) {
         this.update({ completed: leaves(data.questionVOList).length, total: leaves(data.questionVOList).length });
         this.report("ALREADY_SAVED", "服务器已有完整作答记录，保持现有结果");
+        this.store.resetResume();
         return;
       }
       this.update({ phase: "解析", total: leaves(data.questionVOList).length });
@@ -2019,6 +2419,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
           check(signal);
           this.store.save({ ...checkpoint, phase: "verified", updatedAt: Date.now() });
           this.report("VERIFIED", "提交成功，已重新读取并逐题核对作答记录");
+          this.store.resetResume();
           return;
         }
         await sleep(Math.min(1e3, Math.max(1, deadline - Date.now())), signal);
@@ -2061,6 +2462,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
           <label for="units">当前练习</label><select id="units" aria-label="当前练习"></select>
           <div class="row"><label><input id="all" type="checkbox"> 处理当前页全部已加载练习块</label></div>
           <div class="row"><label><input id="continuous" type="checkbox"> 完成后自动进入下一题/下一页</label></div>
+          <div class="row"><label><input id="autoRechallenge" type="checkbox"> 目标未通过时自动 Rechallenge（最多 2 次）</label></div>
           <div class="row"><label>口语录音时长 <input id="seconds" type="number" min="3" max="180" step="1"> 秒</label></div>
           <div class="row"><label>角色扮演/跟读录音来源<select id="rolePlayMode">
             <option value="original">原题音频 → Chivox 评测（生成评分）</option>
@@ -2098,11 +2500,12 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.1";
+      this.el("version").textContent = false ? "dev" : "0.3.2";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
       this.input("continuous").checked = this.settings.continuous;
+      this.input("autoRechallenge").checked = this.settings.autoRechallenge;
       this.input("aiAnswers").checked = this.settings.aiAnswers;
       this.input("aiApiKey").value = this.settings.aiApiKey;
       this.input("aiApiBase").value = this.settings.aiApiBase;
@@ -2136,6 +2539,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
             ...defaults,
             allLoaded: this.input("all").checked,
             continuous: this.input("continuous").checked,
+            autoRechallenge: this.input("autoRechallenge").checked,
             recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds,
             rolePlayAudioMode: ["original", "sample", "microphone"].includes(mode) ? mode : defaults.rolePlayAudioMode,
             aiAnswers: this.input("aiAnswers").checked,
@@ -2215,6 +2619,20 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
       this.timer = setInterval(() => {
         if (!this.controller.busy) this.refresh();
       }, 3e3);
+      void this.resume();
+    }
+    // The legacy site sometimes needs a reload to render an exercise's controls. When the
+    // controller requests one, it leaves this flag so the refreshed page continues by itself.
+    async resume() {
+      if (!this.store.takeResume()) return;
+      for (let attempt = 0; attempt < 60 && !this.disposed; attempt++) {
+        this.refresh();
+        if (this.units.length) break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (this.disposed || !this.units.length || this.controller.busy) return;
+      this.controller.report("RESUME", "页面已自动刷新，继续上次作答", false);
+      void this.controller.start(this.units[0], this.settings);
     }
     refresh(manual = false) {
       if (this.controller.busy) return;
@@ -2268,7 +2686,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
       const progress = this.el("progress");
       progress.max = Math.max(p.total, 1);
       progress.value = p.completed;
-      for (const id2 of ["units", "seconds", "all", "continuous", "aiAnswers", "aiApiKey", "aiApiBase", "aiModel", "asrApiKey", "asrApiBase", "asrModel", "ttsProvider", "ttsApiKey", "ttsApiBase", "ttsModel", "ttsVoice", "rolePlayMode", "refresh", "reset"]) this.el(id2).disabled = busy;
+      for (const id2 of ["units", "seconds", "all", "continuous", "autoRechallenge", "aiAnswers", "aiApiKey", "aiApiBase", "aiModel", "asrApiKey", "asrApiBase", "asrModel", "ttsProvider", "ttsApiKey", "ttsApiBase", "ttsModel", "ttsVoice", "rolePlayMode", "refresh", "reset"]) this.el(id2).disabled = busy;
       this.el("start").disabled = busy || !this.units.length;
       this.el("start").textContent = p.status === "paused" || p.status === "stopped" ? "继续" : "开始";
       this.el("pause").disabled = !busy;
@@ -2291,7 +2709,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.1",
+        version: false ? "dev" : "0.3.2",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),
@@ -2343,6 +2761,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
         return {
           allLoaded: raw.allLoaded === true,
           continuous: raw.continuous !== false,
+          autoRechallenge: raw.autoRechallenge !== false,
           recordingSeconds: typeof raw.recordingSeconds === "number" && Number.isFinite(raw.recordingSeconds) ? Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
           rolePlayAudioMode: mode,
           aiAnswers: raw.aiAnswers === true,
@@ -2400,6 +2819,56 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
     }
     save(checkpoint) {
       this.write(prefix + checkpoint.key, checkpoint);
+    }
+    clearCourse(unitKey) {
+      const parts = unitKey.split(":");
+      parts.pop();
+      const keyPrefix = prefix + parts.join(":") + ":";
+      try {
+        for (let index = this.storage.length - 1; index >= 0; index--) {
+          const key2 = this.storage.key(index);
+          if (key2?.startsWith(keyPrefix)) this.storage.removeItem(key2);
+        }
+      } catch {
+        throw new Halt("STORAGE_WRITE", "无法清理目标旧记录，请检查浏览器存储设置");
+      }
+    }
+    // The site intermittently renders an exercise without its answer controls. A reload
+    // repairs it, so remember only the intent to resume, plus a bounded retry budget.
+    requestResume(now = Date.now()) {
+      const saved = this.resumeState();
+      const state = saved && now - saved.since < 10 * 6e4 ? saved : { count: 0, since: now, requested: false };
+      if (state.count >= 3) return false;
+      try {
+        this.session.setItem(prefix + "resume", JSON.stringify({ count: state.count + 1, since: state.since, requested: true }));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    takeResume() {
+      const state = this.resumeState();
+      if (!state?.requested) return false;
+      try {
+        this.session.setItem(prefix + "resume", JSON.stringify({ ...state, requested: false }));
+      } catch {
+      }
+      return true;
+    }
+    resetResume() {
+      try {
+        this.session.removeItem(prefix + "resume");
+      } catch {
+      }
+    }
+    resumeState() {
+      try {
+        const value = JSON.parse(this.session.getItem(prefix + "resume") || "null");
+        if (!value || typeof value !== "object" || typeof value.count !== "number" || typeof value.since !== "number") return null;
+        return { count: value.count, since: value.since, requested: value.requested === true };
+      } catch {
+        return null;
+      }
     }
     clear(key2) {
       try {

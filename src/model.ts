@@ -44,6 +44,7 @@ export type TtsProvider = 'mimo' | 'openai';
 export interface Settings {
   allLoaded: boolean;
   continuous: boolean;
+  autoRechallenge: boolean;
   recordingSeconds: number;
   rolePlayAudioMode: RolePlayAudioMode;
   aiAnswers: boolean;
@@ -63,7 +64,7 @@ export interface Settings {
 }
 
 export const defaults: Settings = {
-  allLoaded: false, continuous: true, recordingSeconds: 10, rolePlayAudioMode: 'original',
+  allLoaded: false, continuous: true, autoRechallenge: true, recordingSeconds: 10, rolePlayAudioMode: 'original',
   aiAnswers: false, aiApiKey: '', aiApiBase: 'https://api.openai.com/v1', aiModel: 'gpt-4.1-mini',
   asrApiKey: '', asrApiBase: 'https://api.openai.com/v1', asrModel: 'whisper-1',
   ttsProvider: 'mimo', ttsApiKey: '', ttsApiBase: 'https://api.xiaomimimo.com/v1',
@@ -82,6 +83,6 @@ export interface Adapter {
   fill(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown>;
   record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown>;
   submit(unit: Unit, signal: AbortSignal): Promise<void>;
-  next?(unit: Unit, signal: AbortSignal): Promise<Unit | undefined>;
+  next?(unit: Unit, signal: AbortSignal, settings?: Settings, beforeRechallenge?: () => void): Promise<Unit | undefined>;
   conflict(): string | null;
 }

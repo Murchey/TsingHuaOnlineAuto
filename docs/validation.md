@@ -79,15 +79,30 @@
 - 当前目标需要 Rechallenge 重做以提高其他任务分数；自动 Rechallenge 尚未实现，以免未经确认重置目标记录。
 - 浏览器正式安装仍是旧版本；0.3.1 需要在脚本管理器中更新。AI/ASR/TTS 真实调用已在临时页面通过 AI/TTS JSON 与 VOD 验证；ASR multipart 在临时页面受 CORS 限制，正式 GM 环境待验证。
 
+## 0.3.2 对话填空、分类拖拽、组合题与自动恢复
+
+- 第 7/47 题 type 19 对话填空：从题目自带 `audioScript` 逐空还原 6 个答案，写入原站可编辑空格，Submit 后重新读取逐题核对成功。
+- 第 8/47 题 type 9 跟读：7 句原题音频注入 Chivox，Submit 后核对成功。
+- 第 9/47 题 type 18 角色扮演：MiMo TTS 合成所选角色台词，Chivox 评分并写回 `recordAudio`，Submit 后核对成功。
+- 第 10-12、14/47 题 type 8 口语简答：AI 生成回答 → TTS → 原站 VOD 上传，Submit 后核对成功（同一题重复验证两次）。
+- 第 11/47 题 type 11 分类拖拽：AI 将 12 个运动分到 3 个目标区，调用原站 `drag` 与 `answerChange`，Submit 后核对成功。
+- 第 13/47 题 type 15 组合题：3 个填空子题继承父题 `audioScript`，AI 生成答案后一次整块提交，核对成功。
+- 站点偶发只渲染题干不渲染作答控件：本次现场通过手动刷新恢复。适配器新增 `NEEDS_RELOAD`、`sessionStorage` 续跑标记与 3 次刷新上限，面板刷新后自动开始；已有单元测试，真实自动刷新尚未在一次全自动运行中触发。
+- 观察到 Goal 2 Listening 的 A→B→C→D→A 循环，未捕获可见的“闯关失败／成功”弹窗，自动 Rechallenge 未触发。已增加 `PAGE_CYCLE` 保护：未 Rechallenge 却回到已完成页面即停止，避免反复提交；该关卡的评分或循环原因仍需排查。
+- MiMo ASR：`/audio/transcriptions` 返回 HTTP 404，已改为 `/chat/completions` + `input_audio`（请求结构有单元测试）。临时注入页通过本地代理验证 MiMo TTS HTTP 200；正式 GM 环境待验收。
+
 ## 自动验证
 
-执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 80 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
+执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 93 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
 
 覆盖：
 
 - 题型、选项重排、空位顺序、答案缺失和重复、问答换行、组合子题。
 - 新版生产 Vue VNode、选择和文字输入事件、填空延迟与失焦同步。
 - 旧版真实格式路由、UUID 拖拽答案、正常读取 POST、页面原有提交事件、重新读取确认和 UUID 本地恢复。
+- type 19 对话填空的原文还原、AI 回退、控件写入；type 11 分类拖拽的 AI 校验、原站拖拽调用；type 15 子题继承父题原文。
+- 页面控件缺失时自动刷新续跑、刷新次数上限、`PAGE_CYCLE` 循环保护、站点重置答案后自动重做。
+- MiMo Chat Completions ASR 请求结构、GM 请求超时。
 - 旧版 HTTP 530、已提交跳过、缺失答案与未支持角色扮演暂停、关闭课程和过期页面。
 - 旧版角色扮演/跟读多角色数据、仅所选角色完成判定、原题音频下载与 Chivox 写回、无音频时暂停、不调用 `playVadio()`。
 - 通用 AI/ASR/TTS 请求封装、MiMo/OpenAI TTS、Base64 音频解码、JSON 答案解析、缺少 Key 与 API 错误处理；legacy_18 先启动角色流程再 TTS→Chivox（模拟）。
@@ -99,4 +114,4 @@
 
 ## 待验收
 
-安装 0.3.0 后，先在真实脚本管理器刷新并导出诊断，确认 `legacyComponentCount` 大于 0。然后用真实 AI/ASR/TTS Key 在新听力题、`legacy_18` 和执行 AI 答题的文字题上验证 API 调用、Submit、结果页与刷新持久性；另验证关闭连续答题时只处理当前题。已提交过的练习不能重复提交，应另选题目。
+安装 0.3.2 后，先在真实脚本管理器刷新并导出诊断，确认 `legacyComponentCount` 大于 0。重点验证：真实 GM 环境下 `NEEDS_RELOAD` 自动刷新与续跑；MiMo ASR 在真实听力题中的返回；分类拖拽 11 的 AI 结果是否与关卡期望一致；Goal 2 Listening 的 A→B→C→D→A 循环是否与评分门槛有关。已提交过的练习不能重复提交，应另选题目。

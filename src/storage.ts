@@ -27,6 +27,7 @@ export class Store {
       return {
         allLoaded: raw.allLoaded === true,
         continuous: raw.continuous !== false,
+        autoRechallenge: raw.autoRechallenge !== false,
         recordingSeconds: typeof raw.recordingSeconds === 'number' && Number.isFinite(raw.recordingSeconds) ?
           Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
         rolePlayAudioMode: mode,
@@ -75,6 +76,46 @@ export class Store {
     } catch { throw new Halt('STORAGE_READ', '本地提交记录无法读取；请先在网页核查作答结果，再重置记录'); }
   }
   save(checkpoint: Checkpoint): void { this.write(prefix + checkpoint.key, checkpoint); }
+  clearCourse(unitKey: string): void {
+    const parts = unitKey.split(':');
+    parts.pop();
+    const keyPrefix = prefix + parts.join(':') + ':';
+    try {
+      for (let index = this.storage.length - 1; index >= 0; index--) {
+        const key = this.storage.key(index);
+        if (key?.startsWith(keyPrefix)) this.storage.removeItem(key);
+      }
+    } catch { throw new Halt('STORAGE_WRITE', '无法清理目标旧记录，请检查浏览器存储设置'); }
+  }
+  // The site intermittently renders an exercise without its answer controls. A reload
+  // repairs it, so remember only the intent to resume, plus a bounded retry budget.
+  requestResume(now = Date.now()): boolean {
+    const saved = this.resumeState();
+    const state = saved && now - saved.since < 10 * 60_000 ? saved : { count: 0, since: now, requested: false };
+    if (state.count >= 3) return false;
+    try {
+      this.session.setItem(prefix + 'resume', JSON.stringify({ count: state.count + 1, since: state.since, requested: true }));
+      return true;
+    } catch { return false; }
+  }
+  takeResume(): boolean {
+    const state = this.resumeState();
+    if (!state?.requested) return false;
+    try { this.session.setItem(prefix + 'resume', JSON.stringify({ ...state, requested: false })); }
+    catch { /* ignore */ }
+    return true;
+  }
+  resetResume(): void {
+    try { this.session.removeItem(prefix + 'resume'); } catch { /* ignore */ }
+  }
+  private resumeState(): { count: number; since: number; requested: boolean } | null {
+    try {
+      const value = JSON.parse(this.session.getItem(prefix + 'resume') || 'null') as
+        { count?: unknown; since?: unknown; requested?: unknown } | null;
+      if (!value || typeof value !== 'object' || typeof value.count !== 'number' || typeof value.since !== 'number') return null;
+      return { count: value.count, since: value.since, requested: value.requested === true };
+    } catch { return null; }
+  }
   clear(key: string): void {
     try { this.storage.removeItem(prefix + key); }
     catch { throw new Halt('STORAGE_WRITE', '无法重置本地记录，请检查浏览器存储设置'); }

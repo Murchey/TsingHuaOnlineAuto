@@ -7,7 +7,18 @@ export function legacyQuestion(exercise: unknown): Question {
   const audio = collectAudioIds(e);
   if (audio.length) q.audio = audio;
   if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
-    q.children = e.exerciseList.map(legacyQuestion); return q;
+    // Composite listening blocks keep the script on the parent; children need it too so
+    // the AI can answer without a slow or failing ASR round-trip.
+    const parentScript = text(typeof e.audioScript === 'string' ? e.audioScript : '');
+    q.children = e.exerciseList.map(child => {
+      const question = legacyQuestion(child);
+      const ext = object(question.extension);
+      if (parentScript && question.extension && !Array.isArray(question.extension)) {
+        question.extension = { ...ext, audioScript: parentScript };
+      }
+      return question;
+    });
+    return q;
   }
   if (type === 1 || type === 2) {
     q.type = type === 1 ? 'choice_single' : 'choice_multiple'; q.answer = e.answer;
@@ -42,8 +53,38 @@ export function legacyQuestion(exercise: unknown): Question {
         text: richText(object(s).styleText ?? object(s).text ?? object(s).content),
       })),
     };
+  } else if (type === 11) {
+    // Many-to-many classification: each draggable item belongs to exactly one target zone.
+    const targets = arrayField(e, 'drag').map(value => {
+      const target = object(value);
+      return { id: String(target.id ?? ''), text: richText(target.styleContent) || String(target.content ?? '') };
+    });
+    const items = arrayField(e, 'dragged').map(value => {
+      const item = object(value);
+      return { id: String(item.id ?? ''), text: richText(item.styleContent) || String(item.content ?? '') };
+    });
+    if (!targets.length || targets.some(t => !t.id) || !items.length || items.some(i => !i.id)) {
+      throw new Halt('DATA_SHAPE', '旧版分类拖拽题的目标或选项缺失');
+    }
+    q.type = 'legacy_11';
+    q.extension = { legacyType: 11, targets, items };
+  } else if (type === 19) {
+    q.type = 'fill_base';
+    const blanks = Array.isArray(e.fillBlanks) ? e.fillBlanks.map(object) : [];
+    if (!blanks.length || blanks.some(b => typeof b.id !== 'string' || !/^[\w-]+$/.test(b.id as string))) {
+      throw new Halt('DATA_SHAPE', '旧版对话填空标识格式异常');
+    }
+    const parsed = dialogueData(e);
+    q.stem = blanks.map(b => '<span class="zty-exercise-item-fill-blank" id="' + String(b.id) + '"></span>').join('');
+    q.answer = blanks.map(b => {
+      const plain = typeof b.answer === 'string' ? b.answer : '';
+      const standard = typeof b.standardAnswer === 'string' ? b.standardAnswer : '';
+      return { idx: b.id, val: plain || standard };
+    });
+    q.extension = { legacyType: 19, dialogue: parsed.items, blanks: parsed.blanks,
+      audioScript: text(typeof e.audioScript === 'string' ? e.audioScript : '') };
   } else if (type === 20) {
-    q.type = 'oral_simple_speak';
+    q.type = 'essay_questions_answers'; q.answer = text(e.answer);
   }
   return q;
 }
@@ -114,7 +155,86 @@ export function richText(value: unknown): string {
   return chunks.join(' ').trim();
 }
 
+interface DialogueData { items: { role: string; text: string }[]; blanks: { idx: string; before: string; after: string }[] }
+
+// Type 19 interleaves dialogue text with blank placeholders. Keep the nearest text
+// neighbours so the official audio script can later restore each missing segment.
+function dialogueData(e: Record<string, unknown>): DialogueData {
+  const items: DialogueData['items'] = [], blanks: DialogueData['blanks'] = [];
+  for (const raw of arrayField(e, 'dialogueContents')) {
+    const dialogue = object(raw), parts: string[] = [];
+    const paragraphs = Array.isArray(object(dialogue.content).paragraphs) ?
+      object(dialogue.content).paragraphs as unknown[] : [];
+    for (const paragraph of paragraphs) {
+      const contentItems = Array.isArray(object(paragraph).contentItems) ?
+        object(paragraph).contentItems as unknown[] : [];
+      for (let index = 0; index < contentItems.length; index++) {
+        const item = object(contentItems[index]);
+        if (Number(item.type) === 2) {
+          const idx = typeof item.id === 'string' ? item.id : '';
+          if (!idx) continue;
+          const before = object(contentItems[index - 1]).text, after = object(contentItems[index + 1]).text;
+          blanks.push({ idx, before: typeof before === 'string' ? before : '',
+            after: typeof after === 'string' ? after : '' });
+          parts.push('[[' + idx + ']]');
+        } else if (typeof item.text === 'string') parts.push(item.text);
+      }
+    }
+    items.push({ role: String(dialogue.role ?? ''), text: parts.join('') });
+  }
+  return { items, blanks };
+}
+
+// Normalize only for matching, while retaining a map back to the original offsets.
+function normalizeText(value: string): { text: string; map: number[] } {
+  let out = ''; const map: number[] = []; let space = false;
+  for (let index = 0; index < value.length; index++) {
+    let ch = value[index];
+    if (/[‘’]/.test(ch)) ch = "'";
+    else if (/[“”]/.test(ch)) ch = '\"';
+    else if (/[‐-―]/.test(ch)) ch = '-';
+    else if (ch === '\u00a0') ch = ' ';
+    if (/\s/.test(ch)) { if (space) continue; ch = ' '; space = true; } else space = false;
+    for (const piece of ch.toLowerCase()) { out += piece; map.push(index); }
+  }
+  return { text: out, map };
+}
+
+/**
+ * Restore type 19 blanks from the exercise's own audio script. This is exact
+ * source text, so it is preferred over a generative answer whenever it resolves.
+ */
+export function scriptFillAnswers(q: Question): { idx: string; answer: string }[] | null {
+  const ext = object(q.extension);
+  const script = typeof ext.audioScript === 'string' ? ext.audioScript : '';
+  const blanks = Array.isArray(ext.blanks) ? ext.blanks.map(object) : [];
+  if (!script || !blanks.length) return null;
+  const source = normalizeText(script), answers: { idx: string; answer: string }[] = [];
+  for (const blank of blanks) {
+    const idx = typeof blank.idx === 'string' ? blank.idx : '';
+    const before = typeof blank.before === 'string' ? blank.before : '';
+    const after = typeof blank.after === 'string' ? blank.after : '';
+    const prefix = normalizeText(before), suffix = normalizeText(after);
+    if (!idx) return null;
+    const from = prefix.text ? source.text.indexOf(prefix.text) : 0;
+    if (from < 0) return null;
+    const start = from + prefix.text.length;
+    const end = suffix.text ? source.text.indexOf(suffix.text, start) : source.text.length;
+    if (end < 0 || end <= start) return null;
+    const answer = script.slice(source.map[start] ?? script.length, source.map[end] ?? script.length);
+    const cleaned = answer.replace(/^[\s:：,，.。;；!！?？]+|[\s:：,，.。;；!！?？]+$/g, '');
+    if (!cleaned) return null;
+    answers.push({ idx, answer: cleaned });
+  }
+  return answers.length === blanks.length ? answers : null;
+}
+
 export function legacyValue(q: Question, record: unknown): unknown {
+  if (q.type === 'legacy_11') {
+    return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
+      idx, answers: Array.isArray(object(value).choiceIds) ? (object(value).choiceIds as unknown[]).map(String) : [],
+    }));
+  }
   const a = object(record).answer;
   if (q.type === 'fill_base') return Object.entries(object(a)).map(([idx, v]) => ({ idx,
     answer: object(q.extension).legacyType === 24 ? object(v).choiceId : object(v).content }));

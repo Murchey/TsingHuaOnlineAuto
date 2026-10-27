@@ -1,17 +1,17 @@
 # 清华社英语在线练习助手
 
-TypeScript 用户脚本，可安装在脚本猫或篡改猴中。0.3.1 同时识别新版 Vue 阅读器与旧版 `/legacy/course-study-student/...` Angular 学习页。
+TypeScript 用户脚本，可安装在脚本猫或篡改猴中。0.3.2 同时识别新版 Vue 阅读器与旧版 `/legacy/course-study-student/...` Angular 学习页。
 
 ## 本次修复
 
-0.1.0 只支持新版阅读器，而实际登录的课程仍使用 Angular 7.2.16 旧版，导致一直显示“未检测到可用练习”。0.1.1 增加旧版组件发现、正常练习数据读取、UUID 题目标识及刷新恢复、旧版填写与提交适配。0.1.2 增加旧版角色扮演 `legacy_9` 的语音评测和右箭头连续下一题。0.1.3 扩展角色扮演组件与作答结构发现。0.1.4 修复 `legacy_9` 的句子匹配与角色过滤。0.2.0 兼容 `lib-listen-and-repeat-exercise-cs-study` 跟读变体，并把默认录音来源改为“原题音频 → Chivox 评测”。0.2.1 增加 `legacy_18` 角色扮演：选择角色后，用 MiMo TTS 合成该角色每句台词，再灌入原站 Chivox 取得真实评分和 `recordAudio`。面板新增 MiMo API Key、Base、TTS 模型与音色配置，Key 只保存在当前标签页会话。0.2.2 修复加入 GM 权限后脚本管理器隔离沙箱导致的组件桥接失败。0.3.0 增加明确可见的“API 与连续答题设置”：AI、ASR、TTS 各自独立配置 Base/Key/Model，TTS 可选 MiMo 或 OpenAI 兼容接口（默认 MiMo）；听力题检测到题目音频时先调用 ASR，再把转写交给 AI 生成答案；连续答题可单独开启/关闭。`legacy_18` 现在先选角色并调用原站 `start()`，启动阶段屏蔽自动麦克风录音，再灌入 TTS 结果。0.3.1 增加 type 8 口语简答：AI 生成回答文本，TTS 合成音频，调用原站 VOD 上传，写回 `doRecord.answer/ossOrVod`；目标闯关失败时 `GOAL_FAILED` 明确暂停，不自动 Rechallenge。
+0.1.0 只支持新版阅读器，而实际登录的课程仍使用 Angular 7.2.16 旧版，导致一直显示“未检测到可用练习”。0.1.1 增加旧版组件发现、正常练习数据读取、UUID 题目标识及刷新恢复、旧版填写与提交适配。0.1.2 增加旧版角色扮演 `legacy_9` 的语音评测和右箭头连续下一题。0.1.3 扩展角色扮演组件与作答结构发现。0.1.4 修复 `legacy_9` 的句子匹配与角色过滤。0.2.0 兼容 `lib-listen-and-repeat-exercise-cs-study` 跟读变体，并把默认录音来源改为“原题音频 → Chivox 评测”。0.2.1 增加 `legacy_18` 角色扮演：选择角色后，用 MiMo TTS 合成该角色每句台词，再灌入原站 Chivox 取得真实评分和 `recordAudio`。面板新增 MiMo API Key、Base、TTS 模型与音色配置，Key 只保存在当前标签页会话。0.2.2 修复加入 GM 权限后脚本管理器隔离沙箱导致的组件桥接失败。0.3.0 增加明确可见的“API 与连续答题设置”：AI、ASR、TTS 各自独立配置 Base/Key/Model，TTS 可选 MiMo 或 OpenAI 兼容接口（默认 MiMo）；听力题检测到题目音频时先调用 ASR，再把转写交给 AI 生成答案；连续答题可单独开启/关闭。`legacy_18` 现在先选角色并调用原站 `start()`，启动阶段屏蔽自动麦克风录音，再灌入 TTS 结果。0.3.1 增加 type 8 口语简答：AI 生成回答文本，TTS 合成音频，调用原站 VOD 上传，写回 `doRecord.answer/ossOrVod`。0.3.2 增加对话填空 19（优先用题目自带 `audioScript` 精确还原，缺失时走 AI）、分类拖拽 11（AI 分类后调用原站 `drag`）、type 20 文字问答写回、组合题子题继承父题听力原文；页面控件偶发未渲染时自动刷新并在刷新后继续；目标闯关失败自动 Rechallenge（最多 2 次）；页面无 Rechallenge 却回到已完成题时以 `PAGE_CYCLE` 停止，避免重复提交；MiMo ASR 改用 Chat Completions `input_audio`。
 
 2026-10-27 在用户指定浏览器和真实题目上验证：type 9 的 7 句原题音频分别得到 89–96 分，服务器保存 7 条 Chivox 作答，页面 `exerciseStatus=2`，本地总分 13.18。旧版读取接口快速连续请求会返回 HTTP 530，脚本已加入仅针对 530 的退避重试。**`legacy_18` 的 MiMo TTS 代码与模拟测试已完成，但真实 MiMo API 调用需用户填写 Key 后验收。**
 
 ## 安装或更新
 
 1. 停用旧版“清华社视听说修改版 - 自动答题”和其他自动答题脚本，刷新网页。关闭旧面板不会撤销旧脚本已安装的网络与录音钩子。
-2. 在脚本猫／篡改猴编辑本助手，将 `dist/tsinghua-online-auto.user.js` 的**全部内容**替换进去，保存并启用。确认面板版本为 **0.3.1**；`.meta.js` 不能单独运行。
+2. 在脚本猫／篡改猴编辑本助手，将 `dist/tsinghua-online-auto.user.js` 的**全部内容**替换进去，保存并启用。确认面板版本为 **0.3.2**；`.meta.js` 不能单独运行。
 3. 刷新网页后进入课程或教材的日常练习。右下角面板应列出当前练习；旧版带“旧版”及待作答／结果页标记。
 4. 展开“API 与连续答题设置”按需填写 AI/ASR/TTS；点击“开始”。服务器已有完整作答会保持原结果。连续答题默认开启，可关闭后只处理当前练习。
 5. 首次实际提交后手动刷新确认记录仍存在。遇到问题点“导出诊断”。面板收起后点击右下角按钮或按 **Alt+Shift+T** 恢复。
@@ -21,15 +21,17 @@ TypeScript 用户脚本，可安装在脚本猫或篡改猴中。0.3.1 同时识
 | 页面 | 题型 | 当前实现与证据 |
 | --- | --- | --- |
 | 旧版 Angular | 单选 1、多选 2 | 通过页面原有选项回调作答；转换逻辑及合成测试，真实新提交未验证 |
-| 旧版 Angular | 普通／表格／完形填空 3、5、17 | 按空位 UUID 填写原有可编辑控件；真实新提交未验证 |
+| 旧版 Angular | 普通／表格／完形填空 3、5、17 | 按空位 UUID 填写原有可编辑控件；第 13/47 题（组合题 15 的 3 个子题）真实提交并核对成功 |
 | 旧版 Angular | 拖拽填空 24 | 按空位和选项 UUID 调用原站拖放回调；识别与已提交记录跳过已实测，填写与保存为合成集成测试 |
 | 旧版 Angular | 文字问答／翻译／写作 6、7 | textarea 输入事件；启用 AI 答题时用 AI 返回文本，听力音频先走 ASR。模拟测试通过 |
 | 旧版 Angular | 口语简答 8 | AI 生成回答文本 → TTS 合成 → 原站 VOD 上传 → 写回 `answer/ossOrVod`。第 10/47 题真实提交并核对成功，页面该题 5 分 |
-| 旧版 Angular | 普通录音 20 | 原站真实麦克风录音和上传；未实测 |
-| 旧版 Angular | 组合题 14、15、16、25 | 展开已支持子题；识别已实测，整块提交未实测 |
-| 旧版 Angular | 跟读 9 | 默认把原题音频灌入 Chivox，生成真实评分和 Chivox `recordAudio`；支持角色选择和整段跟读两种组件。原题无音频时暂停，不伪造分数。真实提交已验证 |
-| 旧版 Angular | 角色扮演 18 | 先选角色并调用原站 `start()`，再以可配置 TTS（默认 MiMo）合成所选角色台词，灌入 Chivox 评分；缺少 TTS Key 时暂停。模拟测试通过，真实 API 调用待验收 |
-| 旧版 Angular | 听力选择题/填空题 | 启用 AI 答题时，解析题目 `audio` 资源，调用可配置 ASR 转写，再把页面文本、选项、空位和转写一起交给 AI。尚无真实听力题验收 |
+| 旧版 Angular | 文字问答 20 | textarea 输入事件并写回 `doRecord.answer`；第 6/47 题真实提交并核对成功 |
+| 旧版 Angular | 对话填空 19 | 按空位 UUID 写入原站可编辑控件；优先从 `audioScript` 逐空精确还原，缺失时交给 AI；第 7/47 题真实提交并核对成功 |
+| 旧版 Angular | 分类拖拽 11 | AI 把每个选项分到目标区，再调用原站 `drag` 与 `answerChange`；第 11/47 题真实提交并核对成功 |
+| 旧版 Angular | 组合题 14、15、16、25 | 展开子题并继承父题 `audioScript`；15 型听力组合第 13/47 题真实提交并核对成功 |
+| 旧版 Angular | 跟读 9 | 默认把原题音频灌入 Chivox，生成真实评分和 Chivox `recordAudio`；支持角色选择和整段跟读两种组件。原题无音频时暂停，不伪造分数。第 8/47 题真实提交并核对成功 |
+| 旧版 Angular | 角色扮演 18 | 先选角色并调用原站 `start()`，再以可配置 TTS（默认 MiMo）合成所选角色台词，灌入 Chivox 评分；缺少 TTS Key 时暂停。第 9/47 题真实提交并核对成功 |
+| 旧版 Angular | 听力选择题/填空题 | 优先使用题目或父题 `audioScript`；缺失时调用可配置 ASR（支持 OpenAI multipart 与 MiMo Chat Completions `input_audio`），再把页面文本、选项、空位和转写交给 AI |
 | 旧版 Angular | 其他旧版评测变体 | 暂停并提示不支持，需手动作答 |
 | 新版 Vue | 单选、多选、判断、基本填空、文字问答 | DOM 与解析测试；生产 Vue 构建上的合成单选提交集成测试 |
 | 新版 Vue | 口语简答、跟读、单词录音 | 原站按钮与 SDK，权限／取消清理测试；真实录音和评分未验证 |
@@ -41,7 +43,7 @@ TypeScript 用户脚本，可安装在脚本猫或篡改猴中。0.3.1 同时识
 
 提交前保存本地待核对记录，点击原站 Submit 一次；随后重新读取服务器，检查提交次数增加并逐题匹配内容。结果不确定时保留待核对状态，不自动重试。刷新后的继续也先核对。重置记录前请先在网页确认是否真的需要重新提交。
 
-可勾选处理当前页全部练习块；连续答题开启时会在每块完成后调用原站下一页/下一题，关闭时只处理当前选择。目标闯关失败时脚本会暂停并提示 Rechallenge，不会擅自重置已经提交的目标。Web Locks 防止同来源、同浏览器配置的多标签页并发；不覆盖其他浏览器配置或手动提交。暂停／停止中断后续动作和等待，已发送请求无法撤回。
+可勾选处理当前页全部练习块；连续答题开启时会在每块完成后调用原站下一页/下一题，关闭时只处理当前选择。目标闯关失败时默认自动点击 Rechallenge 并清理同一课程的旧记录，最多 2 次；页面偶发不渲染作答控件时自动刷新，刷新后从 `sessionStorage` 续跑；未经过 Rechallenge 却回到已完成题时以 `PAGE_CYCLE` 停止，避免无休止重复提交。Web Locks 防止同来源、同浏览器配置的多标签页并发；不覆盖其他浏览器配置或手动提交。暂停／停止中断后续动作和等待，已发送请求无法撤回。
 
 旧版桥接固定适配已检查的 Angular 7.2.16 和 `main.4c93dc9c6da8077cd693.js`。网站发布新构建后可能需重新适配。出现“无法访问组件”请导出诊断，不要用解除路由或权限检查的方式强行运行。
 
@@ -56,6 +58,6 @@ npm run check
 
 `check` 执行类型检查、构建和测试，安装产物在 `dist/`。源码、测试及适配记录分别在 `src/`、`tests/`、`docs/`。`scripts/browser-console.ps1` 仅用于开发时通过 Windows UI Automation 操作已打开 DevTools 的指定浏览器窗口，必须传入主进程 `BrowserProcessId`；它不会启动浏览器。`scripts/browser-console-bg.ps1` 使用 ValuePattern + PostMessage 在后台执行 DevTools 命令，不激活窗口、不抢焦点。
 
-不保存密码、登录令牌或录音到仓库，不主动上传诊断，不依赖外部 CDN。`src/api.ts` 提供通用 AI Chat、ASR `/audio/transcriptions`、MiMo TTS 和 OpenAI 兼容 TTS 请求；API Key 只存当前标签页 `sessionStorage`。脚本申请 `GM_xmlhttpRequest`、`unsafeWindow` 和 `@connect *`，旧版 Angular 桥接通过页面 window 访问 webpack/ng。诊断不含题干、选项、答案、音频、Cookie、API Key 或 URL 查询参数；旧版路径中的账号段已脱敏。完整课程响应和公开站点资源仅保存在忽略的 `.cache/`，不交付。
+不保存密码、登录令牌或录音到仓库，不主动上传诊断，不依赖外部 CDN。`src/api.ts` 提供通用 AI Chat、OpenAI 兼容 ASR `/audio/transcriptions`、MiMo Chat Completions ASR、MiMo TTS 和 OpenAI 兼容 TTS 请求；API Key 只存当前标签页 `sessionStorage`。脚本申请 `GM_xmlhttpRequest`、`unsafeWindow` 和 `@connect *`，旧版 Angular 桥接通过页面 window 访问 webpack/ng。诊断不含题干、选项、答案、音频、Cookie、API Key 或 URL 查询参数；旧版路径中的账号段已脱敏。完整课程响应和公开站点资源仅保存在忽略的 `.cache/`，不交付。
 
 项目采用仓库已有 GPL-3.0 许可证。旧脚本仅作为兼容性分析参考，未复制其代码或样式。

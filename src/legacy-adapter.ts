@@ -4,7 +4,7 @@ import { scoreWithChivox } from './chivox';
 import { answerWithAi, synthesizeSpeech, transcribeAudio } from './api';
 import { routePath, shown, TsinghuaAdapter } from './adapter';
 import { legacyComponents, runInLegacyZone, type LegacyComponent } from './legacy-angular';
-import { legacyData, legacyValue, richText } from './legacy-data';
+import { legacyData, legacyValue, richText, scriptFillAnswers } from './legacy-data';
 import { Halt, type Adapter, type ExerciseData, type Settings, type Task, type Unit } from './model';
 
 export function legacyRoute(): boolean {
@@ -12,6 +12,7 @@ export function legacyRoute(): boolean {
 }
 
 export class LegacyAdapter implements Adapter {
+  private rechallengeCounts = new Map<string, number>();
   constructor(private components = legacyComponents) {}
   discover(): Unit[] {
     if (!legacyRoute()) return [];
@@ -119,7 +120,8 @@ export class LegacyAdapter implements Adapter {
   }
   async fill(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown> {
     check(signal);
-    const { component: c, root } = this.leaf(unit, task);
+    await this.ready(unit, signal);
+    const { component: c, root } = await this.leafOrReload(unit, task, signal);
     task = await this.aiTask(task, root, c, settings, signal);
     if (task.kind === 'choice') {
       if (typeof c.answerChange !== 'function') throw new Halt('QUESTION_DOM', '旧版选择题控件已变化');
@@ -132,8 +134,31 @@ export class LegacyAdapter implements Adapter {
         else for (const id of ids) if (expected.includes(id) !== current.includes(id)) c.answerChange(id);
       });
     } else if (task.kind === 'fill') {
-      const items = task.value as { idx: string; answer: string }[];
-      if (c.exercise.type === 24) {
+      const items = task.value as { idx: string; answer?: string; answers?: string[] }[];
+      if (task.question.type === 'legacy_11') {
+        if (typeof c.drag !== 'function') throw new Halt('QUESTION_DOM', '分类拖拽控件已变化');
+        const groups = items.map(value => {
+          const group = object(value);
+          return { idx: String(group.idx), answers: Array.isArray(group.answers) ? (group.answers as unknown[]).map(String) : [] };
+        });
+        // Reset the target buckets, then reuse the site's own drag handler for each item.
+        this.run(unit, () => {
+          const record = object(c.doRecord);
+          if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+          const answers = record.answer as Record<string, unknown>;
+          for (const group of groups) answers[group.idx] = { ...object(answers[group.idx]), id: group.idx, choiceIds: [], score: 0 };
+        });
+        const boxes = new Map(groups.flatMap(group => group.answers).map(id => [id,
+          root.querySelector<HTMLElement>('[class~="' + id + '"]') ?? document.createElement('div')]));
+        this.run(unit, () => {
+          for (const group of groups) for (const id of group.answers) {
+            c.drag({ previousContainer: { id, data: [] }, container: { id: group.idx, data: [] },
+              item: { element: { nativeElement: boxes.get(id) } } });
+          }
+          if (typeof c.answerChange === 'function') c.answerChange();
+          else c.doRecordChange.emit(c.doRecord);
+        });
+      } else if (c.exercise.type === 24) {
         if (typeof c.drag !== 'function' || typeof c.delAnswer !== 'function') throw new Halt('QUESTION_DOM', '拖拽控件已变化');
         if (new Set(items.map(i => i.answer)).size !== items.length) throw new Halt('AMBIGUOUS', '拖拽答案存在重复选项，已暂停');
         this.run(unit, () => {
@@ -141,22 +166,39 @@ export class LegacyAdapter implements Adapter {
           for (const { idx, answer } of items) c.drag({ previousContainer: { id: answer, data: {} }, container: { id: idx, data: {} } });
         });
       } else {
+        // Type 19 starts from an empty answer map; initialise each slot before the
+        // inline handler writes into it, then let the site's own (input) binding run.
+        this.run(unit, () => {
+          const record = object(c.doRecord);
+          if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+          const answers = record.answer as Record<string, unknown>;
+          for (const { idx } of items) {
+            if (!answers[idx] || typeof answers[idx] !== 'object') answers[idx] = { id: idx, score: 0, content: '' };
+          }
+        });
         const fields = items.map(item => {
           const matches = [...root.querySelectorAll<HTMLElement>('[contenteditable="true"]')].filter(e => e.id === `a-${item.idx}`);
           if (matches.length !== 1) throw new Halt('QUESTION_DOM', `填空 ${item.idx} 未找到唯一输入框`);
           return { item, field: matches[0] };
         });
         for (const { item, field } of fields) {
-          check(signal); field.focus(); field.innerText = item.answer;
+          check(signal); field.focus(); field.innerText = item.answer ?? '';
           field.dispatchEvent(new Event('input', { bubbles: true })); field.blur();
         }
       }
     } else if (task.kind === 'writing') {
       const fields = root.querySelectorAll('textarea');
       if (fields.length !== 1) throw new Halt('QUESTION_DOM', '问答输入框不唯一或尚未加载');
-      const field = fields[0];
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, object(task.value).answer);
+      const field = fields[0], answer = object(task.value).answer;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, answer);
       field.dispatchEvent(new Event('input', { bubbles: true })); field.dispatchEvent(new Event('change', { bubbles: true })); field.blur();
+      if (String(c.doRecord.answer ?? '') !== String(answer)) {
+        this.run(unit, () => {
+          c.doRecord.answer = answer;
+          if (typeof c.dataChange === 'function') c.dataChange();
+          else c.doRecordChange.emit(c.doRecord);
+        });
+      }
     }
     await sleep(80, signal); this.editable(unit);
     const actual = legacyValue(task.question, c.doRecord);
@@ -166,7 +208,8 @@ export class LegacyAdapter implements Adapter {
     return actual;
   }
   async record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown> {
-    const { component: c, root } = this.leaf(unit, task);
+    await this.ready(unit, signal);
+    const { component: c, root } = await this.leafOrReload(unit, task, signal);
     if (![8, 9, 18, 20].includes(Number(c.exercise.type))) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
     if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c);
     if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
@@ -206,8 +249,13 @@ export class LegacyAdapter implements Adapter {
     let answer = typeof q.answer === 'string' ? q.answer.trim() : '';
     if (settings.aiAnswers) {
       if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '口语简答题需要 AI 生成回答，请填写 AI API Key');
-      const transcript = q.audio?.length && settings.asrApiKey.trim() ?
-        await this.transcribeQuestionAudio(c, q.audio, settings, signal) : '';
+      let transcript = '';
+      if (q.audio?.length && settings.asrApiKey.trim()) {
+        // The transcript only enriches the prompt; a failing ASR must not block an
+        // otherwise answerable speaking task.
+        try { transcript = await this.transcribeQuestionAudio(c, q.audio, settings, signal); }
+        catch (error) { if (error instanceof Halt && error.code === 'CANCELLED') throw error; }
+      }
       const prompt = `你是英语口语考试助手。请根据题目写一个自然、简洁、适合朗读的英语回答，2-4 句。只返回 JSON：{"answer":"..."}。
 题目: ${q.instruction || q.stem || ''}
 页面文本:
@@ -483,28 +531,120 @@ ${(q.stem || '').slice(0, 3000)}
     if (!target.every(done)) throw new Halt('TTS_SCORE', 'TTS 已处理，但网页未接收角色扮演作答，请导出诊断');
     return legacyValue(task.question, c.doRecord);
   }
+  // The legacy page sometimes renders before its own record request finishes, which
+  // leaves the exercise in the initial read-only state with no inputs. Re-run the
+  // site's own loader inside Angular's zone, then reopen an empty result record.
+  private async ready(unit: Unit, signal: AbortSignal): Promise<LegacyComponent> {
+    this.assertContext(unit);
+    const c = this.instance(unit);
+    if (Number(c.exerciseStatus) === 1) return c;
+    if (Number(c.exerciseStatus) === 0 && typeof c.loadDoRecord === 'function') {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        runInLegacyZone(() => c.loadDoRecord());
+        try {
+          await until(() => Number(c.exerciseStatus) !== 0 ? true : undefined, 6_000, signal);
+          break;
+        } catch (error) {
+          if (signal.aborted || (error instanceof Halt && error.code !== 'PAGE_TIMEOUT')) throw error;
+          if (attempt < 2) await sleep(1_200, signal);
+        }
+      }
+    }
+    if (Number(c.exerciseStatus) === 0) {
+      throw new Halt('NEEDS_RELOAD', '练习作答控件未渲染（页面偶发空白，需要刷新）');
+    }
+    if (Number(c.exerciseStatus) === 2 && this.emptyRecord(c)) {
+      runInLegacyZone(() => {
+        if (typeof c.retry === 'function') c.retry();
+        else { c.exerciseStatus = 1; c.doRecord = { type: c.exercise?.type }; }
+      });
+      await until(() => Number(c.exerciseStatus) === 1 ? true : undefined, 5_000, signal);
+    }
+    if (Number(c.exerciseStatus) !== 1) throw new Halt('READ_ONLY', '当前为已提交的结果页；保持现有结果，请手动选择待作答练习');
+    return c;
+  }
+  // A rendered-but-empty exercise may still lack its controls. One native reload of the
+  // record is cheap; if that fails the controller refreshes the page and resumes.
+  private async leafOrReload(unit: Unit, task: Task, signal: AbortSignal):
+    Promise<{ component: LegacyComponent; root: HTMLElement }> {
+    try { return this.leaf(unit, task); }
+    catch (error) {
+      if (!(error instanceof Halt) || error.code !== 'QUESTION_DOM') throw error;
+      const c = this.instance(unit);
+      // Only a rendered-but-unbound page justifies a reload; a stale page with another
+      // exercise id is a genuine mismatch and must keep failing closed.
+      if (String(c.exercise?.id ?? '') !== String(task.question.id)) throw error;
+      if (typeof c.loadDoRecord === 'function') {
+        runInLegacyZone(() => c.loadDoRecord());
+        try {
+          await until(() => { try { this.leaf(unit, task); return true; } catch { return undefined; } }, 4_000, signal);
+        } catch { throw new Halt('NEEDS_RELOAD', '练习作答控件未渲染（页面偶发空白，需要刷新）'); }
+      }
+      return this.leaf(unit, task);
+    }
+  }
+  private emptyRecord(c: LegacyComponent): boolean {
+    if (c.isEmptyDoRecord === true) return true;
+    const record = object(c.doRecord), answers = record.answer;
+    if (answers == null) return true;
+    if (typeof answers === 'string') return !answers.trim();
+    if (Array.isArray(answers)) return answers.length === 0;
+    const values = Object.values(object(answers));
+    if (!values.length) return true;
+    return values.every(value => {
+      const entry = object(value);
+      const content = entry.content ?? entry.recordAudio ?? entry.choiceId ?? entry.answer;
+      if (typeof content === 'string') return !content.trim();
+      if (Array.isArray(content)) return content.length === 0;
+      return content == null;
+    });
+  }
   private async aiTask(task: Task, root: HTMLElement, c: LegacyComponent, settings: Settings,
     signal: AbortSignal): Promise<Task> {
+    const ext = object(task.question.extension);
+    // Type 19 carries the official listening script, so its blanks can be restored
+    // verbatim. This is exact source text and far safer than a paraphrase; AI is
+    // still used whenever the script cannot resolve every blank.
+    if (task.kind === 'fill' && Number(ext.legacyType) === 19) {
+      const scripted = scriptFillAnswers(task.question);
+      if (scripted) return { ...task, value: scripted };
+    }
     if (!settings.aiAnswers || task.kind === 'recording') return task;
     if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '已启用 AI 答题，但未填写 AI API Key');
     const q = task.question;
-    const transcript = q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : '';
+    const script = typeof ext.audioScript === 'string' ? ext.audioScript : '';
+    const dialogue = Array.isArray(ext.dialogue) ? ext.dialogue.map(line => {
+      const entry = object(line);
+      return `${String(entry.role || '')}: ${String(entry.text || '')}`;
+    }) : [];
+    // The legacy listening exercises expose their script; ASR is only a fallback.
+    const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : '');
     const options = Array.isArray(q.extension) ? q.extension.map(option => ({
       id: String(object(option).idx), text: text(object(option).val),
     })) : [];
     const blanks = Array.isArray(task.value) ? task.value.map(object).map(blank => ({ idx: String(blank.idx) })) : [];
+    const catalog = Number(ext.legacyType) === 11 ? {
+      targets: (Array.isArray(ext.targets) ? ext.targets : []).map(target => ({ id: String(object(target).id), text: String(object(target).text ?? '') })),
+      items: (Array.isArray(ext.items) ? ext.items : []).map(item => ({ id: String(object(item).id), text: String(object(item).text ?? '') })),
+    } : null;
     const schema = task.kind === 'choice' ? '{"choice":["选项ID", ...]}' :
-      (task.kind === 'fill' ? '{"fill":[{"idx":"空位ID","answer":"答案"}]}' : '{"answer":"完整答案文本"}');
+      (task.kind === 'fill' ? (Number(ext.legacyType) === 11 ? '{"fill":[{"idx":"目标ID","answers":["项目ID", ...]}]}' :
+        '{"fill":[{"idx":"空位ID","answer":"答案"}]}') : '{"answer":"完整答案文本"}');
     const prompt = `你正在完成清华社英语旧版练习。只返回一个 JSON 对象，不要 Markdown。
 题型: ${q.type}（${task.kind}）
 题目说明: ${q.instruction || ''}
+对话（[[空位ID]] 为待填空格）: ${dialogue.length ? '\n' + dialogue.join('\n') : '（无）'}
 页面可见文本:
 ${(root.innerText || '').slice(0, 6000)}
 选项: ${JSON.stringify(options)}
 空位: ${JSON.stringify(blanks)}
+${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
+待分类项: ${JSON.stringify(catalog.items)}` : ''}
 听力转写: ${transcript || '（无）'}
 返回格式: ${schema}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填空的 answer 必须使用选项中的 ID。' : ''}
+${q.type === 'fill_base' && object(q.extension).legacyType === 19 ? '对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。' : ''}
+${Number(ext.legacyType) === 11 ? '每个待分类项必须且只能放入一个目标，全部项目都要分配。' : ''}
 必须严格回答当前题目。`;
     const result = await answerWithAi(prompt, settings, signal);
     return { ...task, value: this.validateAiValue(task, result) };
@@ -539,6 +679,26 @@ ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填�
         throw new Halt('AI_ANSWER', 'AI 返回的选项不符合当前选择题');
       }
       return q.type === 'choice_multiple' ? selected : selected[0];
+    }
+    if (task.kind === 'fill' && Number(object(q.extension).legacyType) === 11) {
+      const ext = object(q.extension);
+      const itemIds = new Set((Array.isArray(ext.items) ? ext.items : []).map(item => String(object(item).id)));
+      const targets = Array.isArray(task.value) ? task.value.map(object) : [];
+      const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
+      const byId = new Map(fill.map(entry => [String(entry.idx),
+        Array.isArray(entry.answers) ? (entry.answers as unknown[]).map(String) : []]));
+      const seen = new Set<string>();
+      const value = targets.map(target => {
+        const idx = String(target.idx), answers = byId.get(idx) ?? [];
+        if (!answers.length) throw new Halt('AI_ANSWER', `AI 返回的分类目标 ${idx} 为空`);
+        for (const id of answers) {
+          if (!itemIds.has(id) || seen.has(id)) throw new Halt('AI_ANSWER', 'AI 返回的分类项缺失、重复或不属于本题');
+          seen.add(id);
+        }
+        return { idx, answers };
+      });
+      if (seen.size !== itemIds.size) throw new Halt('AI_ANSWER', 'AI 返回的分类没有覆盖全部选项');
+      return value;
     }
     if (task.kind === 'fill') {
       const blanks = Array.isArray(task.value) ? task.value.map(object) : [];
@@ -634,12 +794,14 @@ ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填�
     const score = /本次成绩[:：]\s*(\d+)\s*分/.exec(found.text)?.[1];
     return `目标闯关未通过${score ? `（${score}分）` : ''}，请手动 Rechallenge 或调整答案后重试`;
   }
-  async next(unit: Unit, signal: AbortSignal): Promise<Unit | undefined> {
+  async next(unit: Unit, signal: AbortSignal, settings?: Settings,
+    beforeRechallenge?: () => void): Promise<Unit | undefined> {
     check(signal); this.assertContext(unit);
     const failed = this.goalFailure();
-    if (failed) throw new Halt('GOAL_FAILED', failed);
+    if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
     const successModal = this.challengeModal();
     if (successModal && /闯关成功/.test(successModal.text)) {
+      this.rechallengeCounts.delete(unit.key);
       successModal.modal.querySelector<HTMLElement>('.ant-modal-close')?.click();
       await sleep(300, signal);
     }
@@ -648,11 +810,37 @@ ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填�
     if (!right || right.getAttribute('aria-disabled') === 'true' || right.classList.contains('disabled')) return undefined;
     const oldKey = unit.key;
     right.click();
+    try {
+      await until(() => {
+        const failure = this.goalFailure();
+        if (failure) throw new Halt('GOAL_FAILURE_DETECTED', failure);
+        const found = this.discover()[0];
+        return found && found.key !== oldKey ? found : undefined;
+      }, 20_000, signal);
+    } catch (error) {
+      if (error instanceof Halt && error.code === 'GOAL_FAILURE_DETECTED') {
+        return this.rechallenge(unit, signal, error.message, settings, beforeRechallenge);
+      }
+      throw error;
+    }
+    return this.discover()[0];
+  }
+  private async rechallenge(unit: Unit, signal: AbortSignal, reason: string, settings?: Settings,
+    beforeRechallenge?: () => void): Promise<Unit | undefined> {
+    if (!settings?.autoRechallenge) throw new Halt('GOAL_FAILED', reason);
+    const count = (this.rechallengeCounts.get(unit.key) || 0) + 1;
+    if (count > 2) throw new Halt('GOAL_RETRY_LIMIT', `${reason}；已自动 Rechallenge 2 次，暂停`);
+    const modal = this.challengeModal();
+    if (!modal) throw new Halt('GOAL_FAILED', reason);
+    const again = [...modal.modal.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => /rechallenge/i.test(button.textContent || ''));
+    if (!again) throw new Halt('GOAL_FAILED', `${reason}；未找到 Rechallenge 按钮`);
+    this.rechallengeCounts.set(unit.key, count);
+    beforeRechallenge?.();
+    again.click();
     await until(() => {
-      const failure = this.goalFailure();
-      if (failure) throw new Halt('GOAL_FAILED', failure);
       const found = this.discover()[0];
-      return found && found.key !== oldKey ? found : undefined;
+      return found && found.key !== unit.key ? found : undefined;
     }, 20_000, signal);
     return this.discover()[0];
   }

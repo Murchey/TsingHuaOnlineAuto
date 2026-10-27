@@ -16,23 +16,23 @@ describe('current production Vue page adapter', () => {
   });
   it('fills a choice through its real input change event', async () => {
     const page = mountPage(data(choice)), a = new TsinghuaAdapter(), u = a.discover()[0];
-    expect(await a.fill(u, taskFor(choice), signal())).toBe('b');
+    expect(await a.fill(u, taskFor(choice), settings, signal())).toBe('b');
     expect(page.root.querySelector<HTMLInputElement>('input[value="b"]')?.checked).toBe(true);
     expect(page.submit).not.toHaveBeenCalled();
   });
   it('writes every fill blank then blurs so the page receives the answer', async () => {
     mountPage(data(fill)); const a = new TsinghuaAdapter();
-    expect(await a.fill(a.discover()[0], taskFor(fill), signal())).toEqual(taskFor(fill).value);
+    expect(await a.fill(a.discover()[0], taskFor(fill), settings, signal())).toEqual(taskFor(fill).value);
   });
   it('finds an essay textarea inside a fragment-rendered child component', async () => {
     mountPage(data(writing)); const a = new TsinghuaAdapter();
-    expect(await a.fill(a.discover()[0], taskFor(writing), signal())).toEqual(taskFor(writing).value);
+    expect(await a.fill(a.discover()[0], taskFor(writing), settings, signal())).toEqual(taskFor(writing).value);
   });
   it('waits for fill listeners installed after page rendering', async () => {
     const page = mountPage(data(fill)), a = new TsinghuaAdapter();
     const stem = page.root.querySelector<HTMLElement>('#do_102')!; delete stem.dataset.teFillBlankContainerInited;
     setTimeout(() => { stem.dataset.teFillBlankContainerInited = '1'; }, 25);
-    expect(await a.fill(a.discover()[0], taskFor(fill), signal())).toEqual(taskFor(fill).value);
+    expect(await a.fill(a.discover()[0], taskFor(fill), settings, signal())).toEqual(taskFor(fill).value);
   });
   it('loads through the page callback and submits only the local practice button', async () => {
     const page = mountPage(data(choice)), a = new TsinghuaAdapter(), u = a.discover()[0];

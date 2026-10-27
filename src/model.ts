@@ -6,6 +6,7 @@ export interface Question {
   answer?: unknown;
   extension?: unknown;
   doRecord?: unknown;
+  audio?: string[];
   children?: Question[];
 }
 
@@ -38,23 +39,35 @@ export interface Task {
 }
 
 export type RolePlayAudioMode = 'original' | 'sample' | 'microphone';
+export type TtsProvider = 'mimo' | 'openai';
 
 export interface Settings {
   allLoaded: boolean;
+  continuous: boolean;
   recordingSeconds: number;
   rolePlayAudioMode: RolePlayAudioMode;
-  mimoApiKey: string;
-  mimoApiBase: string;
-  mimoTtsModel: string;
-  mimoTtsVoice: string;
+  aiAnswers: boolean;
+  aiApiKey: string;
+  aiApiBase: string;
+  aiModel: string;
+  asrApiKey: string;
+  asrApiBase: string;
+  asrModel: string;
+  ttsProvider: TtsProvider;
+  ttsApiKey: string;
+  ttsApiBase: string;
+  ttsModel: string;
+  ttsVoice: string;
   timeoutMs: number;
   intervalMs: number;
 }
 
 export const defaults: Settings = {
-  allLoaded: false, recordingSeconds: 10, rolePlayAudioMode: 'original',
-  mimoApiKey: '', mimoApiBase: 'https://api.xiaomimimo.com/v1',
-  mimoTtsModel: 'mimo-v2.5-tts', mimoTtsVoice: 'mimo_default',
+  allLoaded: false, continuous: true, recordingSeconds: 10, rolePlayAudioMode: 'original',
+  aiAnswers: false, aiApiKey: '', aiApiBase: 'https://api.openai.com/v1', aiModel: 'gpt-4.1-mini',
+  asrApiKey: '', asrApiBase: 'https://api.openai.com/v1', asrModel: 'whisper-1',
+  ttsProvider: 'mimo', ttsApiKey: '', ttsApiBase: 'https://api.xiaomimimo.com/v1',
+  ttsModel: 'mimo-v2.5-tts', ttsVoice: 'mimo_default',
   timeoutMs: 30_000, intervalMs: 350,
 };
 
@@ -66,7 +79,7 @@ export interface Adapter {
   discover(): Unit[];
   assertContext(unit: Unit): void;
   load(unit: Unit, signal: AbortSignal): Promise<ExerciseData>;
-  fill(unit: Unit, task: Task, signal: AbortSignal): Promise<unknown>;
+  fill(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown>;
   record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown>;
   submit(unit: Unit, signal: AbortSignal): Promise<void>;
   next?(unit: Unit, signal: AbortSignal): Promise<Unit | undefined>;

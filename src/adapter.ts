@@ -141,7 +141,7 @@ export class TsinghuaAdapter implements Adapter {
 
   private control(unit: Unit, signal: AbortSignal): void { check(signal); this.assertContext(unit); }
 
-  async fill(unit: Unit, task: Task, signal: AbortSignal): Promise<unknown> {
+  async fill(unit: Unit, task: Task, _settings: Settings, signal: AbortSignal): Promise<unknown> {
     this.control(unit, signal);
     const scope = this.scope(unit, task.question);
     if (task.kind === 'choice') {

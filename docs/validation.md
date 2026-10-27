@@ -1,6 +1,6 @@
 # 验证记录
 
-日期：2026-10-27，版本 0.2.2。
+日期：2026-10-27，版本 0.3.0。
 
 ## 真实浏览器
 
@@ -29,7 +29,7 @@
 - 每句得到稳定 Chivox `recordAudio` URL。提交后服务器保存了 7 条作答，页面 `exerciseStatus=2`，本地记录分 `13.18`。这证明“原题音频 → Chivox → 服务器”链路可用。
 - 0.2.0 把该链路写入 `src/chivox.ts`，默认模式为 `original`；原题音频缺失时暂停，不伪造分数。`src/legacy-adapter.ts` 的自动化测试用 mock 验证了下载、评分、写回和 `dataChange()`。
 - 连续读取 `record_for_detail` 在同一秒内会间歇返回 HTTP 530；间隔 350ms 的连续请求可复现，间隔 1.5s 可成功。适配器最多重试 3 次（1.2s/2.4s），只重试 HTTP 530。
-- `src/mimo.ts` 已提供 MiMo TTS/AI 请求接口和 `GM_xmlhttpRequest` 支持；0.2.0 时尚未接入业务流程，接口测试使用模拟响应。
+- 0.2.0 时 MiMo 请求接口尚未接入业务流程；0.3.0 已拆分为 `src/api.ts` 的通用 AI/ASR/TTS 接口，接口测试使用模拟响应。
 
 ## 0.2.1 legacy_18 角色扮演 TTS
 
@@ -53,9 +53,20 @@
 
 **尚未完成：在用户实际脚本管理器中更新 0.2.2 后刷新，重新导出诊断确认页面组件可见。**
 
+## 0.3.0 API、ASR、连续答题与 legacy_18 启动
+
+- 面板新增可见且默认展开的“API 与连续答题设置”：连续答题、AI 答题、AI Base/Key/Model、ASR Base/Key/Model、TTS 提供方/Base/Key/Model/音色。Key 仅存当前标签页 `sessionStorage`。
+- AI 与 ASR 使用独立 OpenAI 兼容接口；TTS 支持 MiMo `/chat/completions`（默认）和 OpenAI 兼容 `/audio/speech`。
+- 旧版题目数据增加 `audio` 收集；启用 AI 答题时，若题目有音频则先调用 ASR `/audio/transcriptions`，ASR 转写与页面文本、选项、空位一起交给 AI。AI 答题启用时允许页面答案缺失，由 AI 生成后继续走原控件和提交核对。
+- 连续答题由独立 `continuous` 设置控制；开启时每块完成调用原站下一页/下一题，关闭时只处理当前选择。默认开启以保留旧行为。
+- `legacy_18` 现在先 `selectRole`，再调用原站 `start()` 完成倒计时和所选角色答案初始化；启动期间临时屏蔽 `changeAudioUrl()` 自动麦克风录音，随后才做 TTS→Chivox，避免未启动就灌音导致提交失败。
+- 自动化测试 76 项通过；AI/ASR/TTS 使用模拟请求和模拟评分，未调用真实第三方 API。
+
+**尚未完成：在实际脚本管理器中更新 0.3.0、重新导出诊断确认组件可见；用真实 AI/ASR/TTS Key 验证各类 API 调用；在真实听力题和新的 legacy_18 题上完成 Submit→结果页→刷新持久性验收。**
+
 ## 自动验证
 
-执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 73 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
+执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 76 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
 
 覆盖：
 
@@ -64,7 +75,8 @@
 - 旧版真实格式路由、UUID 拖拽答案、正常读取 POST、页面原有提交事件、重新读取确认和 UUID 本地恢复。
 - 旧版 HTTP 530、已提交跳过、缺失答案与未支持角色扮演暂停、关闭课程和过期页面。
 - 旧版角色扮演/跟读多角色数据、仅所选角色完成判定、原题音频下载与 Chivox 写回、无音频时暂停、不调用 `playVadio()`。
-- MiMo TTS/AI 请求封装、Base64 音频解码、JSON 答案解析、缺少 Key 和 API 错误处理；legacy_18 的 TTS→Chivox 流程使用模拟 TTS/评分。
+- 通用 AI/ASR/TTS 请求封装、MiMo/OpenAI TTS、Base64 音频解码、JSON 答案解析、缺少 Key 与 API 错误处理；legacy_18 先启动角色流程再 TTS→Chivox（模拟）。
+- AI 答题允许页面答案缺失、听力音频收集与 ASR 转写上下文、连续答题开关（模拟）。
 - 单次提交、双击互斥、提交前持久化、失败／超时、迟到成功、刷新恢复和存储损坏。
 - 麦克风拒绝、暂停清理；设备与录音服务使用模拟，不代表真实麦克风成功。
 - 面板早期／晚期挂载、恢复与重复注入、诊断脱敏。
@@ -72,4 +84,4 @@
 
 ## 待验收
 
-安装 0.2.1 后，在新的待作答练习中用完整面板验证跟读 9 的“原题音频 → Chivox”流程；在 `legacy_18` 新题中填写真实 MiMo Key，验证 TTS→Chivox→Submit→结果页→刷新持久性。已提交过的练习不能重复提交，应另选题目。随后再验证真实麦克风模式。其他旧版评测题继续明确暂停。
+安装 0.3.0 后，先在真实脚本管理器刷新并导出诊断，确认 `legacyComponentCount` 大于 0。然后用真实 AI/ASR/TTS Key 在新听力题、`legacy_18` 和执行 AI 答题的文字题上验证 API 调用、Submit、结果页与刷新持久性；另验证关闭连续答题时只处理当前题。已提交过的练习不能重复提交，应另选题目。

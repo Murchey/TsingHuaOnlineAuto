@@ -4,6 +4,8 @@ import { Halt, type AnswerRecord, type ExerciseData, type Question } from './mod
 export function legacyQuestion(exercise: unknown): Question {
   const e = normalizeExercise(exercise), type = Number(e.type);
   const q: Question = { id: String(e.id || ''), type: `legacy_${type}`, instruction: String(e.contentString || '') };
+  const audio = collectAudioIds(e);
+  if (audio.length) q.audio = audio;
   if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
     q.children = e.exerciseList.map(legacyQuestion); return q;
   }
@@ -47,7 +49,7 @@ export function legacyQuestion(exercise: unknown): Question {
 function normalizeExercise(value: unknown): Record<string, unknown> {
   const root = object(value);
   if (root.type != null && root.id != null) return root;
-  for (const key of ['exercise', 'object', 'item', 'data']) {
+  for (const key of ['exercise', 'object', 'item', 'data', 'choices']) {
     const nested = object(root[key]);
     if (nested.type != null || nested.id != null) return normalizeExercise(nested);
   }
@@ -66,6 +68,32 @@ function arrayField(e: Record<string, unknown>, ...keys: string[]): unknown[] {
     if (found.length) return found;
   }
   return [];
+}
+
+function collectAudioIds(value: unknown): string[] {
+  const out: string[] = [], seen = new Set<unknown>(), queue: unknown[] = [value];
+  const add = (v: unknown): void => {
+    if (v == null) return;
+    if (typeof v === 'string') { if (v.trim()) out.push(v.trim()); return; }
+    if (Array.isArray(v)) { for (const item of v) add(item); return; }
+    if (typeof v !== 'object') return;
+    const nested = object(v);
+    for (const key of ['id', 'resId', 'url', 'audioUrl', 'path']) {
+      if (nested[key] !== undefined) add(nested[key]);
+    }
+  };
+  while (queue.length && seen.size < 50) {
+    const e = object(queue.shift());
+    if (!Object.keys(e).length || seen.has(e)) continue;
+    seen.add(e);
+    for (const key of ['audio', 'audios', 'audioList', 'audioUrl', 'listenAudio', 'sound', 'soundUrl']) add(e[key]);
+    for (const key of ['exercise', 'object', 'item', 'data']) {
+      const nested = e[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested && typeof nested === 'object') queue.push(nested);
+    }
+  }
+  return [...new Set(out)];
 }
 
 export function richText(value: unknown): string {

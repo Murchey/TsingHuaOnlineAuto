@@ -9,7 +9,7 @@ export class AdaptiveAdapter implements Adapter {
   discover() { return this.active.discover(); }
   assertContext(unit: Unit) { return this.active.assertContext(unit); }
   load(unit: Unit, signal: AbortSignal) { return this.active.load(unit, signal); }
-  fill(unit: Unit, task: Task, signal: AbortSignal) { return this.active.fill(unit, task, signal); }
+  fill(unit: Unit, task: Task, settings: Settings, signal: AbortSignal) { return this.active.fill(unit, task, settings, signal); }
   record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal) { return this.active.record(unit, task, settings, signal); }
   submit(unit: Unit, signal: AbortSignal) { return this.active.submit(unit, signal); }
   next(unit: Unit, signal: AbortSignal) { return this.active.next?.(unit, signal) || Promise.resolve(undefined); }

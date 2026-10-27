@@ -8,6 +8,10 @@ it('restores defaults for damaged settings and clamps duration', () => {
   localStorage.setItem('thoa:v1:settings', '{"recordingSeconds":999,"allLoaded":true}');
   expect(new Store().settings().recordingSeconds).toBe(180); expect(new Store().settings().allLoaded).toBe(true);
   expect(new Store().settings().rolePlayAudioMode).toBe('original');
+  expect(new Store().settings().continuous).toBe(true);
+  expect(new Store().settings().ttsProvider).toBe('mimo');
+  new Store().saveSettings({ ...defaults, aiApiKey: 'ai', asrApiKey: 'asr', ttsApiKey: 'tts' });
+  expect(new Store().settings()).toMatchObject({ aiApiKey: 'ai', asrApiKey: 'asr', ttsApiKey: 'tts' });
   localStorage.setItem('thoa:v1:settings', '{"rolePlayAudioMode":"microphone"}');
   expect(new Store().settings().rolePlayAudioMode).toBe('microphone');
   localStorage.setItem('thoa:v1:settings', '{"rolePlayExampleAudio":false}');

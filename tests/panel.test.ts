@@ -20,6 +20,10 @@ describe('independent panel lifecycle', () => {
     expect(panel.host.isConnected).toBe(true);
     expect(shadow.getElementById('message')?.textContent).toContain('助手已运行');
     expect((shadow.getElementById('rolePlayMode') as HTMLSelectElement).value).toBe('original');
+    expect((shadow.getElementById('continuous') as HTMLInputElement).checked).toBe(true);
+    expect((shadow.getElementById('ttsProvider') as HTMLSelectElement).value).toBe('mimo');
+    expect(shadow.getElementById('aiApiBase')).not.toBeNull();
+    expect(shadow.getElementById('asrApiBase')).not.toBeNull();
     expect((shadow.getElementById('start') as HTMLButtonElement).disabled).toBe(true);
   });
   it('waits for body at document-start and recovers if the SPA removes the host', async () => {

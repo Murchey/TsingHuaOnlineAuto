@@ -12,6 +12,7 @@ describe('built userscript in an isolated production Vue application', () => {
     expect(script).toContain('// @grant        GM_xmlhttpRequest');
     expect(script).toContain('// @grant        unsafeWindow');
     expect(script).toContain('// @connect      api.xiaomimimo.com');
+    expect(script).toContain('// @connect      *');
     expect(script).toContain('// @inject-into  page');
     expect(script).not.toMatch(/\/\/ @require\s/);
     expect(script).not.toContain('update.greasyfork.org/scripts/452423');

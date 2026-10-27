@@ -13,7 +13,7 @@ const labels: Record<string, string> = { idle: '待开始', running: '运行中'
 const styles = `
 :host{all:initial!important;position:fixed!important;right:18px!important;bottom:18px!important;z-index:2147483647!important;display:block!important;color-scheme:light!important;font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif!important;color:#263044!important}
 *{box-sizing:border-box}button,input,select{font:inherit}button{cursor:pointer;border:1px solid #d6dce7;border-radius:7px;background:#fff;color:#263044;padding:5px 11px}button:hover{background:#edf1fa}button:disabled{opacity:.45;cursor:default}.primary{background:#6c37a5;color:white;border-color:#6c37a5}.primary:hover{background:#572a89}
-.panel{width:min(365px,calc(100vw - 36px));max-height:85vh;overflow:auto;background:white;border:1px solid #dbe0e9;border-radius:14px;box-shadow:0 8px 38px #1c183d33}.header{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:#f6f1fb;border-radius:14px 14px 0 0}.header strong{font-size:15px}.header button{padding:0 8px;font-size:19px}.body{padding:14px 16px}.hint{font-size:12px;color:#697285;margin:8px 0}.status{font-weight:650;color:#67369b}.message{overflow-wrap:anywhere;white-space:pre-wrap;font-size:13px;min-height:42px}.progress{margin:8px 0;width:100%;accent-color:#6c37a5}.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:9px 0}select{width:100%;border:1px solid #d6dce7;border-radius:7px;padding:7px;background:white;color:inherit}input[type=number]{width:65px;border:1px solid #d6dce7;border-radius:5px;padding:3px}label{font-size:13px}input[type=checkbox]{accent-color:#6c37a5}details{border-top:1px solid #edf0f4;margin-top:10px;padding-top:8px}summary{cursor:pointer;font-size:12px;color:#697285}.logs{max-height:150px;overflow:auto;margin:7px 0;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.error{color:#aa3040}.mini{border-radius:25px;background:#6c37a5;color:white;padding:10px 16px;box-shadow:0 4px 20px #33174933}.hidden{display:none!important}.actions button{flex:1}.pending{font-size:12px;color:#aa3040;max-height:70px;overflow:auto}.toolbar button{font-size:12px;padding:4px 8px}input[type=text],input[type=password]{width:100%;border:1px solid #d6dce7;border-radius:5px;padding:5px;margin:3px 0}details label{display:block;margin:6px 0}
+.panel{width:min(365px,calc(100vw - 36px));max-height:85vh;overflow:auto;background:white;border:1px solid #dbe0e9;border-radius:14px;box-shadow:0 8px 38px #1c183d33}.header{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:#f6f1fb;border-radius:14px 14px 0 0}.header strong{font-size:15px}.header button{padding:0 8px;font-size:19px}.body{padding:14px 16px}.hint{font-size:12px;color:#697285;margin:8px 0}.status{font-weight:650;color:#67369b}.message{overflow-wrap:anywhere;white-space:pre-wrap;font-size:13px;min-height:42px}.progress{margin:8px 0;width:100%;accent-color:#6c37a5}.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:9px 0}select{width:100%;border:1px solid #d6dce7;border-radius:7px;padding:7px;background:white;color:inherit}input[type=number]{width:65px;border:1px solid #d6dce7;border-radius:5px;padding:3px}label{font-size:13px}input[type=checkbox]{accent-color:#6c37a5}details{border-top:1px solid #edf0f4;margin-top:10px;padding-top:8px}summary{cursor:pointer;font-size:12px;color:#697285}.logs{max-height:150px;overflow:auto;margin:7px 0;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.error{color:#aa3040}.mini{border-radius:25px;background:#6c37a5;color:white;padding:10px 16px;box-shadow:0 4px 20px #33174933}.hidden{display:none!important}.actions button{flex:1}.pending{font-size:12px;color:#aa3040;max-height:70px;overflow:auto}.toolbar button{font-size:12px;padding:4px 8px}input[type=text],input[type=password]{width:100%;border:1px solid #d6dce7;border-radius:5px;padding:5px;margin:3px 0}details label{display:block;margin:6px 0}h4{margin:10px 0 2px;font-size:12px;color:#67369b}
 `;
 
 export class Panel {
@@ -42,7 +42,8 @@ export class Panel {
         <div class="body"><div class="status" id="status" role="status" aria-live="polite"></div>
           <p class="message" id="message"></p>
           <label for="units">当前练习</label><select id="units" aria-label="当前练习"></select>
-          <div class="row"><label><input id="all" type="checkbox"> 处理本章节全部已加载练习块</label></div>
+          <div class="row"><label><input id="all" type="checkbox"> 处理当前页全部已加载练习块</label></div>
+          <div class="row"><label><input id="continuous" type="checkbox"> 完成后自动进入下一题/下一页</label></div>
           <div class="row"><label>口语录音时长 <input id="seconds" type="number" min="3" max="180" step="1"> 秒</label></div>
           <div class="row"><label>角色扮演/跟读录音来源<select id="rolePlayMode">
             <option value="original">原题音频 → Chivox 评测（生成评分）</option>
@@ -50,12 +51,26 @@ export class Panel {
             <option value="microphone">真实麦克风</option>
           </select></label></div>
           <p class="hint">type 9 有原题音频时默认灌入原站 Chivox 生成评分；type 18 角色扮演使用 MiMo TTS 合成台词后再评测。跟读和单词题遵循页面时长。</p>
-          <details><summary>MiMo TTS 配置（legacy_18）</summary>
-            <label>API Key <input id="mimoApiKey" type="password" autocomplete="off"></label>
-            <label>API Base <input id="mimoApiBase" type="text"></label>
-            <label>TTS 模型 <input id="mimoTtsModel" type="text"></label>
-            <label>TTS 音色 <input id="mimoTtsVoice" type="text"></label>
-            <p class="hint">API Key 只保存在当前标签页会话。legacy_18 缺少配置时会暂停，不会退回麦克风。</p>
+          <details open><summary>API 与连续答题设置</summary>
+            <div class="row"><label><input id="aiAnswers" type="checkbox"> 用 AI API 生成旧版题目答案（听力题先走 ASR）</label></div>
+            <h4>AI 答题 API（OpenAI 兼容）</h4>
+            <label>API Key <input id="aiApiKey" type="password" autocomplete="off"></label>
+            <label>API Base <input id="aiApiBase" type="text"></label>
+            <label>模型 <input id="aiModel" type="text"></label>
+            <h4>ASR 语音识别 API（OpenAI 兼容）</h4>
+            <label>API Key <input id="asrApiKey" type="password" autocomplete="off"></label>
+            <label>API Base <input id="asrApiBase" type="text"></label>
+            <label>模型 <input id="asrModel" type="text"></label>
+            <h4>TTS 语音合成 API</h4>
+            <label>提供方 <select id="ttsProvider">
+              <option value="mimo">MiMo（推荐）</option>
+              <option value="openai">OpenAI 兼容 /audio/speech</option>
+            </select></label>
+            <label>API Key <input id="ttsApiKey" type="password" autocomplete="off"></label>
+            <label>API Base <input id="ttsApiBase" type="text"></label>
+            <label>模型 <input id="ttsModel" type="text"></label>
+            <label>音色 <input id="ttsVoice" type="text"></label>
+            <p class="hint">所有 API Key 只保存在当前标签页会话。听力题若检测到题目音频且已启用 AI 答题，会先调用 ASR。TTS 默认 MiMo，legacy_18 缺少配置时暂停。</p>
           </details>
           <progress id="progress" class="progress" value="0" max="1"></progress><div class="hint" id="counts"></div>
           <div class="actions row"><button class="primary" id="start">开始</button><button id="pause">暂停</button><button id="stop">停止</button></div>
@@ -70,10 +85,19 @@ export class Panel {
     this.input('all').checked = this.settings.allLoaded;
     this.input('seconds').value = String(this.settings.recordingSeconds);
     (this.el('rolePlayMode') as HTMLSelectElement).value = this.settings.rolePlayAudioMode;
-    this.input('mimoApiKey').value = this.settings.mimoApiKey;
-    this.input('mimoApiBase').value = this.settings.mimoApiBase;
-    this.input('mimoTtsModel').value = this.settings.mimoTtsModel;
-    this.input('mimoTtsVoice').value = this.settings.mimoTtsVoice;
+    this.input('continuous').checked = this.settings.continuous;
+    this.input('aiAnswers').checked = this.settings.aiAnswers;
+    this.input('aiApiKey').value = this.settings.aiApiKey;
+    this.input('aiApiBase').value = this.settings.aiApiBase;
+    this.input('aiModel').value = this.settings.aiModel;
+    this.input('asrApiKey').value = this.settings.asrApiKey;
+    this.input('asrApiBase').value = this.settings.asrApiBase;
+    this.input('asrModel').value = this.settings.asrModel;
+    (this.el('ttsProvider') as HTMLSelectElement).value = this.settings.ttsProvider;
+    this.input('ttsApiKey').value = this.settings.ttsApiKey;
+    this.input('ttsApiBase').value = this.settings.ttsApiBase;
+    this.input('ttsModel').value = this.settings.ttsModel;
+    this.input('ttsVoice').value = this.settings.ttsVoice;
     this.el('collapse').addEventListener('click', () => {
       this.el('panel').classList.add('hidden'); this.el('mini').classList.remove('hidden');
     });
@@ -86,14 +110,24 @@ export class Panel {
       try {
         const raw = Number(this.input('seconds').value);
         const mode = (this.el('rolePlayMode') as HTMLSelectElement).value;
+        const provider = (this.el('ttsProvider') as HTMLSelectElement).value;
         this.settings = { ...defaults, allLoaded: this.input('all').checked,
+          continuous: this.input('continuous').checked,
           recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds,
           rolePlayAudioMode: ['original', 'sample', 'microphone'].includes(mode) ?
             mode as Settings['rolePlayAudioMode'] : defaults.rolePlayAudioMode,
-          mimoApiKey: this.input('mimoApiKey').value.trim(),
-          mimoApiBase: this.input('mimoApiBase').value.trim() || defaults.mimoApiBase,
-          mimoTtsModel: this.input('mimoTtsModel').value.trim() || defaults.mimoTtsModel,
-          mimoTtsVoice: this.input('mimoTtsVoice').value.trim() || defaults.mimoTtsVoice };
+          aiAnswers: this.input('aiAnswers').checked,
+          aiApiKey: this.input('aiApiKey').value.trim(),
+          aiApiBase: this.input('aiApiBase').value.trim() || defaults.aiApiBase,
+          aiModel: this.input('aiModel').value.trim() || defaults.aiModel,
+          asrApiKey: this.input('asrApiKey').value.trim(),
+          asrApiBase: this.input('asrApiBase').value.trim() || defaults.asrApiBase,
+          asrModel: this.input('asrModel').value.trim() || defaults.asrModel,
+          ttsProvider: ['mimo', 'openai'].includes(provider) ? provider as Settings['ttsProvider'] : defaults.ttsProvider,
+          ttsApiKey: this.input('ttsApiKey').value.trim(),
+          ttsApiBase: this.input('ttsApiBase').value.trim() || defaults.ttsApiBase,
+          ttsModel: this.input('ttsModel').value.trim() || defaults.ttsModel,
+          ttsVoice: this.input('ttsVoice').value.trim() || defaults.ttsVoice };
         this.input('seconds').value = String(this.settings.recordingSeconds);
         this.store.saveSettings(this.settings);
         void this.controller.start(unit, this.settings);
@@ -172,7 +206,7 @@ export class Panel {
     this.el('counts').textContent = `题目 ${p.completed}/${p.total} · 练习块 ${p.unitsDone}/${p.unitsTotal}${p.type ? ' · ' + p.type : ''}`;
     const progress = this.el('progress') as HTMLProgressElement;
     progress.max = Math.max(p.total, 1); progress.value = p.completed;
-    for (const id of ['units', 'seconds', 'all', 'rolePlayMode', 'mimoApiKey', 'mimoApiBase', 'mimoTtsModel', 'mimoTtsVoice', 'refresh', 'reset']) (this.el(id) as HTMLInputElement | HTMLSelectElement).disabled = busy;
+    for (const id of ['units', 'seconds', 'all', 'continuous', 'aiAnswers', 'aiApiKey', 'aiApiBase', 'aiModel', 'asrApiKey', 'asrApiBase', 'asrModel', 'ttsProvider', 'ttsApiKey', 'ttsApiBase', 'ttsModel', 'ttsVoice', 'rolePlayMode', 'refresh', 'reset']) (this.el(id) as HTMLInputElement | HTMLSelectElement).disabled = busy;
     (this.el('start') as HTMLButtonElement).disabled = busy || !this.units.length;
     this.el('start').textContent = p.status === 'paused' || p.status === 'stopped' ? '继续' : '开始';
     (this.el('pause') as HTMLButtonElement).disabled = !busy;

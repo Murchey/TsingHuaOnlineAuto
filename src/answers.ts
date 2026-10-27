@@ -26,7 +26,7 @@ function required(value: unknown, id: string | number): asserts value is string 
   if (typeof value !== 'string' || !value.trim()) throw new Halt('NO_ANSWER', `题目 ${id} 没有可解析的答案`);
 }
 
-export function taskFor(q: Question, record?: AnswerRecord): Task {
+export function taskFor(q: Question, record?: AnswerRecord, allowMissing = false): Task {
   const raw = q.answer !== '' && q.answer != null ? q.answer : record?.answer;
   const answer = parse(raw);
   const extension = parse(q.extension);
@@ -39,25 +39,34 @@ export function taskFor(q: Question, record?: AnswerRecord): Task {
     const values = Array.isArray(selected) ? selected : [selected];
     const options = q.type === 'judge_basic' ? ['1', '0'] :
       Array.isArray(extension) ? extension.map(o => String(object(o).idx)) : [];
-    if (!options.length || new Set(options).size !== options.length || !values.length ||
-        (q.type !== 'choice_multiple' && values.length !== 1) ||
+    if (!options.length || new Set(options).size !== options.length) {
+      throw new Halt('NO_ANSWER', `题目 ${q.id} 的选项缺失或重复`);
+    }
+    if (allowMissing && (raw == null || raw === '')) {
+      return { question: q, kind: 'choice', value: q.type === 'choice_multiple' ? [] : '' };
+    }
+    if (!values.length || (q.type !== 'choice_multiple' && values.length !== 1) ||
         values.some(v => typeof v !== 'string' || !options.includes(v)) || new Set(values).size !== values.length) {
       throw new Halt('NO_ANSWER', `题目 ${q.id} 的答案缺失或与选项不匹配`);
     }
     return { question: q, kind: 'choice', value: q.type === 'choice_multiple' ? values : values[0] };
   }
   if (q.type === 'fill_base') {
-    if (!Array.isArray(answer) || !answer.length) throw new Halt('NO_ANSWER', `填空题 ${q.id} 没有答案`);
     const doc = new DOMParser().parseFromString(q.stem || '', 'text/html');
     const ids = [...doc.querySelectorAll('span.zty-exercise-item-fill-blank[id]')].map(el => el.id);
-    if (!ids.length || new Set(ids).size !== ids.length || ids.length !== answer.length) {
+    const answers = Array.isArray(answer) ? answer : [];
+    if (!ids.length || new Set(ids).size !== ids.length || (!allowMissing && answers.length !== ids.length)) {
       throw new Halt('AMBIGUOUS', `填空题 ${q.id} 的空位与答案数量不一致`);
     }
     const value = ids.map(idx => {
-      const matches = answer.map(object).filter(a => a.idx === idx);
-      if (matches.length !== 1) throw new Halt('AMBIGUOUS', `填空题 ${q.id} 的空位标识无法唯一匹配`);
+      const matches = answers.map(object).filter(a => a.idx === idx);
+      if (matches.length !== 1) {
+        if (allowMissing) return { idx, answer: '' };
+        throw new Halt('AMBIGUOUS', `填空题 ${q.id} 的空位标识无法唯一匹配`);
+      }
       const a = matches[0];
       const val = typeof a.standardAnswer === 'string' && a.standardAnswer.trim() ? a.standardAnswer : a.val;
+      if (allowMissing && (typeof val !== 'string' || !val.trim())) return { idx, answer: '' };
       required(val, q.id);
       // The site documents semicolon-separated accepted variants; choose the first explicitly listed variant.
       const selected = text(val.split(/[;；]/)[0]);
@@ -68,13 +77,13 @@ export function taskFor(q: Question, record?: AnswerRecord): Task {
   }
   if (['essay_writing', 'essay_translate', 'essay_questions_answers'].includes(q.type)) {
     const value = text(typeof answer === 'string' ? answer : object(answer).answer);
-    required(value, q.id);
+    if (!allowMissing) required(value, q.id);
     return { question: q, kind: 'writing', value: { answer: value, annex: [] } };
   }
   throw new Halt('UNSUPPORTED', `暂不支持题型 ${q.type}（题目 ${q.id}），已暂停`);
 }
 
-export function planTasks(data: ExerciseData): Task[] {
+export function planTasks(data: ExerciseData, options: { allowMissing?: boolean } = {}): Task[] {
   const qs = leaves(data.questionVOList);
   if (!qs.length) throw new Halt('EMPTY', '当前练习没有题目，或题目尚未加载');
   const ids = qs.map(q => String(q.id));
@@ -85,7 +94,7 @@ export function planTasks(data: ExerciseData): Task[] {
   if (new Set(records.map(r => String(r.questionId))).size !== records.length) {
     throw new Halt('AMBIGUOUS', '作答记录中出现重复题目标识');
   }
-  return qs.map(q => taskFor(q, records.find(r => String(r.questionId) === String(q.id))));
+  return qs.map(q => taskFor(q, records.find(r => String(r.questionId) === String(q.id)), options.allowMissing === true));
 }
 
 export function stable(value: unknown): string {

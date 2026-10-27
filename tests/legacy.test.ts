@@ -6,10 +6,10 @@ import { Controller } from '../src/controller';
 import { Store } from '../src/storage';
 import { defaults } from '../src/model';
 import { scoreWithChivox } from '../src/chivox';
-import { mimoTts } from '../src/mimo';
+import { answerWithAi, synthesizeSpeech, transcribeAudio } from '../src/api';
 
 vi.mock('../src/chivox', () => ({ scoreWithChivox: vi.fn() }));
-vi.mock('../src/mimo', () => ({ mimoTts: vi.fn() }));
+vi.mock('../src/api', () => ({ synthesizeSpeech: vi.fn(), answerWithAi: vi.fn(), transcribeAudio: vi.fn() }));
 
 const path = '/legacy/course-study-student/10/20/30/example-key';
 const signal = () => new AbortController().signal;
@@ -258,20 +258,23 @@ describe('legacy production route regression', () => {
       exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise18, pageTitle: 'Role 18',
       doRecord: { type: 18, answer: {}, roleId: '', saSentScore: 0 }, loadDoRecord() {},
       doRecordChange: { emit: changes }, dataChange() { changes(this.doRecord); },
-      selectRole(id: string) { this.doRecord.roleId = id; }, start: vi.fn(), selectNowRole: vi.fn(),
-      showSelectRole: true, showTime: true, isClose: false };
+      selectRole(id: string) { this.doRecord.roleId = id; }, start() {
+        this.showSelectRole = false; this.showTime = false; this.isClose = true;
+        this.doRecord.answer = { 'r-a1': { recordAudio: '' }, 'r-a2': { recordAudio: '' } };
+      }, selectNowRole: vi.fn(),
+      showSelectRole: true, showTime: true, isClose: true };
     const speech: any = { chivoxRecorder: { context: {} }, speechService: { startSentence: vi.fn() } };
     const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c },
       { root: document.createElement('div'), component: speech }]);
     const unit = adapter.discover()[0];
     const task = planTasks(legacyData({ exercise: exercise18, submitNum: 0, doRecord: c.doRecord }))[0];
-    vi.mocked(mimoTts).mockResolvedValue(new ArrayBuffer(8));
+    vi.mocked(synthesizeSpeech).mockResolvedValue(new ArrayBuffer(8));
     vi.mocked(scoreWithChivox).mockResolvedValue({ score: 90, accuracy: 91, fluency: 89, senseGroup: 0,
       speed: 0, stress: 0, integrity: 0, rhythm: 0, pron: 0, recordAudio: 'https://chivox.example/v18.mp3', words: [], ccode: {}, result: '' });
-    const settings = { ...defaults, mimoApiKey: 'test-key', mimoTtsModel: 'tts-model', mimoTtsVoice: 'voice' };
+    const settings = { ...defaults, ttsApiKey: 'test-key', ttsModel: 'tts-model', ttsVoice: 'voice' };
     const value = await adapter.record(unit, task, settings, signal());
-    expect(mimoTts).toHaveBeenCalledTimes(2);
-    expect(mimoTts).toHaveBeenNthCalledWith(1, 'Role A one', expect.objectContaining({ apiKey: 'test-key' }), expect.anything());
+    expect(synthesizeSpeech).toHaveBeenCalledTimes(2);
+    expect(synthesizeSpeech).toHaveBeenNthCalledWith(1, 'Role A one', expect.objectContaining({ ttsApiKey: 'test-key' }), expect.anything());
     expect(scoreWithChivox).toHaveBeenCalledTimes(2);
     expect(c.doRecord.roleId).toBe('role-a');
     expect(c.doRecord.answer['r-a1'].recordAudio).toBe('https://chivox.example/v18.mp3');
@@ -298,7 +301,37 @@ describe('legacy production route regression', () => {
       { root: document.createElement('div'), component: speech }]);
     const unit = adapter.discover()[0];
     const task = planTasks(legacyData({ exercise: exercise18, submitNum: 0, doRecord: c.doRecord }))[0];
-    await expect(adapter.record(unit, task, { ...defaults, mimoApiKey: '' }, signal())).rejects.toThrow('MiMo TTS');
+    await expect(adapter.record(unit, task, { ...defaults, ttsApiKey: '' }, signal())).rejects.toThrow('TTS');
+  });
+  it('transcribes listening audio and uses the AI answer for a writing question', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-writing-sample><textarea></textarea></lib-writing-sample><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const exercise8: any = { id: 'ai-q', type: 8, contentString: 'Write a short answer.', audio: 'audio-res' };
+    const changes = vi.fn();
+    const getResUrl = vi.fn((id: string) => ({ subscribe: ({ next }: any) => {
+      next({ url: `https://cdn.example/${id}.mp3` }); return { unsubscribe: vi.fn() };
+    } }));
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise8, pageTitle: 'AI listening',
+      doRecord: { type: 8, answer: '' }, loadDoRecord() {}, doRecordChange: { emit: changes },
+      getWebUrlService: { getResUrl } };
+    const textarea = host.querySelector('textarea')!;
+    textarea.addEventListener('input', () => { c.doRecord.answer = textarea.value; });
+    textarea.addEventListener('change', () => { c.doRecord.answer = textarea.value; });
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
+    const unit = adapter.discover()[0];
+    const data = legacyData({ exercise: exercise8, submitNum: 0, doRecord: c.doRecord });
+    const task = planTasks(data, { allowMissing: true })[0];
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) })));
+    vi.mocked(transcribeAudio).mockResolvedValue('listening transcript');
+    vi.mocked(answerWithAi).mockResolvedValue({ answer: 'AI generated answer' });
+    const settings = { ...defaults, aiAnswers: true, aiApiKey: 'ai-key', asrApiKey: 'asr-key' };
+    await adapter.fill(unit, task, settings, signal());
+    expect(transcribeAudio).toHaveBeenCalledTimes(1);
+    expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('listening transcript'), settings, expect.anything());
+    expect(textarea.value).toBe('AI generated answer');
+    expect(c.doRecord.answer).toBe('AI generated answer');
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());

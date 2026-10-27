@@ -23,24 +23,41 @@ export class Store {
       const raw = JSON.parse(this.storage.getItem(prefix + 'settings') || '{}');
       const mode = ['original', 'sample', 'microphone'].includes(raw.rolePlayAudioMode) ? raw.rolePlayAudioMode :
         (raw.rolePlayExampleAudio === false ? 'microphone' : defaults.rolePlayAudioMode);
+      const provider = ['mimo', 'openai'].includes(raw.ttsProvider) ? raw.ttsProvider : defaults.ttsProvider;
       return {
         allLoaded: raw.allLoaded === true,
+        continuous: raw.continuous !== false,
         recordingSeconds: typeof raw.recordingSeconds === 'number' && Number.isFinite(raw.recordingSeconds) ?
           Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
         rolePlayAudioMode: mode,
-        mimoApiKey: this.readSession(prefix + 'mimoApiKey'),
-        mimoApiBase: settingString(raw.mimoApiBase, defaults.mimoApiBase, 300),
-        mimoTtsModel: settingString(raw.mimoTtsModel, defaults.mimoTtsModel, 120),
-        mimoTtsVoice: settingString(raw.mimoTtsVoice, defaults.mimoTtsVoice, 120),
+        aiAnswers: raw.aiAnswers === true,
+        aiApiKey: this.readSession(prefix + 'aiApiKey'),
+        aiApiBase: settingString(raw.aiApiBase, defaults.aiApiBase, 300),
+        aiModel: settingString(raw.aiModel, defaults.aiModel, 120),
+        asrApiKey: this.readSession(prefix + 'asrApiKey'),
+        asrApiBase: settingString(raw.asrApiBase, defaults.asrApiBase, 300),
+        asrModel: settingString(raw.asrModel, defaults.asrModel, 120),
+        ttsProvider: provider,
+        ttsApiKey: this.readSession(prefix + 'ttsApiKey') || this.readSession(prefix + 'mimoApiKey'),
+        ttsApiBase: settingString(raw.ttsApiBase ?? raw.mimoApiBase, defaults.ttsApiBase, 300),
+        ttsModel: settingString(raw.ttsModel ?? raw.mimoTtsModel, defaults.ttsModel, 120),
+        ttsVoice: settingString(raw.ttsVoice ?? raw.mimoTtsVoice, defaults.ttsVoice, 120),
         timeoutMs: defaults.timeoutMs, intervalMs: defaults.intervalMs,
       };
-    } catch { return { ...defaults, mimoApiKey: this.readSession(prefix + 'mimoApiKey') }; }
+    } catch {
+      return { ...defaults, aiApiKey: this.readSession(prefix + 'aiApiKey'),
+        asrApiKey: this.readSession(prefix + 'asrApiKey'),
+        ttsApiKey: this.readSession(prefix + 'ttsApiKey') || this.readSession(prefix + 'mimoApiKey') };
+    }
   }
   saveSettings(settings: Settings): void {
-    const { mimoApiKey, ...persisted } = settings;
+    const { aiApiKey, asrApiKey, ttsApiKey, ...persisted } = settings;
     this.write(prefix + 'settings', persisted);
-    try { this.session.setItem(prefix + 'mimoApiKey', mimoApiKey); }
-    catch { throw new Halt('STORAGE_WRITE', '无法保存 MiMo API Key 到当前会话，请检查浏览器存储设置'); }
+    try {
+      this.session.setItem(prefix + 'aiApiKey', aiApiKey);
+      this.session.setItem(prefix + 'asrApiKey', asrApiKey);
+      this.session.setItem(prefix + 'ttsApiKey', ttsApiKey);
+    } catch { throw new Halt('STORAGE_WRITE', '无法保存 API Key 到当前会话，请检查浏览器存储设置'); }
   }
   private readSession(key: string): string {
     try { return this.session.getItem(key) || ''; } catch { return ''; }

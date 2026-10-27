@@ -36,6 +36,12 @@ describe('answer parsing', () => {
     expect(() => planTasks({ ...data({ ...choice, answer: '' }), questionAnswerItemVOList: [{ questionId: 999, answer: 'b' }] })).toThrow();
     expect(() => taskFor({ ...choice, answer: '' }, { questionId: 101, userAnswer: 'b' })).toThrow();
   });
+  it('allows answer scaffolds for AI generation only when explicitly enabled', () => {
+    const missingChoice = data({ ...choice, answer: '' }), missingWriting = data({ ...writing, answer: '' });
+    expect(() => planTasks(missingChoice)).toThrow();
+    expect(planTasks(missingChoice, { allowMissing: true })[0]).toMatchObject({ kind: 'choice', value: '' });
+    expect(planTasks(missingWriting, { allowMissing: true })[0].value).toEqual({ answer: '', annex: [] });
+  });
   it('preflights combined questions and rejects duplicate ids and unsupported types', () => {
     expect(planTasks(data({ id: 1, type: 'combined_basic', children: [choice, fill] }))).toHaveLength(2);
     expect(() => planTasks(data(choice, choice))).toThrow(/重复/);

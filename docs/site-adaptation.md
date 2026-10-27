@@ -18,11 +18,13 @@
 
 角色扮演/跟读 9 型有两种实际组件：带 `selectRole/start` 的角色选择变体，以及 `lib-listen-and-repeat-exercise-cs-study` 整段跟读变体。两种都从 `getWebUrlService.getResUrl(sentItem.audio, 2)` 解析原题 MP3。0.2.0 默认执行“原题音频 → Chivox 评测”：页面 `fetch` 下载音频，在录音器自己的 AudioContext 中解码，静音麦克风和扬声器，把 BufferSource 连接到 `Html5Recorder.node`，再通过 `speechService.startSentence(text, duration)` 触发原站评测。Chivox 返回真实分数和稳定 `recordAudio` 后写回 `doRecord.answer` 并触发 `dataChange()`。
 
-角色选择变体只处理所选角色句子；跟读变体处理全部句子。原题缺少音频时暂停，不伪造分数。面板另保留“原题音频直填（不评分）”和“真实麦克风”排障模式。MiMo TTS/AI 接口已在 `src/mimo.ts` 预留，但未接入本流程。其他旧版评测变体继续暂停。
+角色选择变体只处理所选角色句子；跟读变体处理全部句子。原题缺少音频时暂停，不伪造分数。面板另保留“原题音频直填（不评分）”和“真实麦克风”排障模式。TTS、AI、ASR 分别使用独立设置；TTS 默认 MiMo，也可切换 OpenAI 兼容接口。其他旧版评测变体继续暂停。
 
-`legacy_18` 是角色扮演题型：`LIB-ROLE-PLAY-EXERCISE-CS-STUDY` 提供 `selectRole/start/dataChange`，`doRecord` 含 `roleId` 和 `saSentScore`。0.2.1 选择角色后只处理该角色的 `sentItems`，逐句调用 MiMo TTS（`mimo-v2.5-tts`，可配置模型/音色/Base/Key），把返回的 MP3 解码后交给同一个 `scoreWithChivox` 录音注入器，取得真实评分和 Chivox `recordAudio`，写回 `doRecord.answer`，最后关闭角色选择遮罩并触发 `dataChange()`。MiMo Key 只保存在当前标签页会话；缺少 Key 时暂停，不退回麦克风。
+`legacy_18` 是角色扮演题型：`LIB-ROLE-PLAY-EXERCISE-CS-STUDY` 提供 `selectRole/start/dataChange`，`doRecord` 含 `roleId` 和 `saSentScore`。0.2.1 选择角色后只处理该角色的 `sentItems`，逐句调用 MiMo TTS（`mimo-v2.5-tts`，可配置模型/音色/Base/Key），把返回的 MP3 解码后交给同一个 `scoreWithChivox` 录音注入器，取得真实评分和 Chivox `recordAudio`，写回 `doRecord.answer`，先调用原站 `start()` 完成角色选择和倒计时，启动阶段临时屏蔽 `changeAudioUrl()` 的自动麦克风录音；随后逐句 TTS→Chivox，最后关闭角色选择遮罩并触发 `dataChange()`。TTS Key 只保存在当前标签页会话；缺少 Key 时暂停，不退回麦克风。
 
 0.2.2 起脚本同时申请 `GM_xmlhttpRequest` 和 `unsafeWindow`。用户脚本管理器在授予 GM API 后可能把脚本放入隔离沙箱；沙箱内的 `window.webpackJsonp` 与 `window.ng` 不等于页面对象，直接访问会得到 0 个组件。`legacy-angular.ts` 现在优先使用 `unsafeWindow`（并兼容其挂在 `window.unsafeWindow` 的情况）读取页面 document、`ng.coreTokens.ApplicationRef` 和 webpack runtime。诊断仍会显示组件数；若仍为 0，应检查脚本管理器是否提供 `unsafeWindow`。
+
+0.3.0 的 API 设置不再绑定 MiMo：AI Chat 与 ASR 使用独立 OpenAI 兼容 Base/Key/Model；TTS 提供 MiMo 和 OpenAI `/audio/speech` 两种提供方，默认 MiMo。听力题从练习数据提取 `audio/audios/audioList/listenAudio` 等资源，经 `getResUrl` 下载后调用 ASR `/audio/transcriptions`，转写文本与页面文本、选项、空位一起交给 AI。AI 答题启用时允许页面答案缺失，由 AI 生成后仍走原有控件与提交核对。连续答题是独立设置，开启后每块完成调用原站下一页/下一题。
 
 ## 新版 Vue
 

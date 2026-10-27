@@ -77,7 +77,7 @@ export class Controller {
           this.update({ unitsDone: this.progress.unitsDone + 1 });
           // Legacy course pages expose a first-party next button; follow it until the
           // course reports no reachable next page. Modern Vue blocks keep their old behavior.
-          if (!settings.allLoaded && this.adapter.next) {
+          if (settings.continuous && this.adapter.next) {
             const next = await this.adapter.next(unit, signal);
             if (next) { units.push(next); this.update({ unitsTotal: units.length }); }
           }
@@ -118,7 +118,7 @@ export class Controller {
     this.update({ phase: '解析', total: leaves(data.questionVOList).length });
     // Preflight the entire block: no partial random answers or trial submissions to reveal keys.
     let tasks;
-    try { tasks = planTasks(data); }
+    try { tasks = planTasks(data, { allowMissing: settings.aiAnswers }); }
     catch (error) {
       this.update({ pending: leaves(data.questionVOList).map(q => ({ questionId: String(q.id), type: q.type,
         reason: error instanceof Halt ? error.message : '解析失败' })) });
@@ -130,7 +130,7 @@ export class Controller {
       this.update({ phase: task.kind === 'recording' ? '录音' : '填写', type: task.question.type,
         message: `正在处理题目 ${task.question.id}` });
       const value = task.kind === 'recording' ? await this.adapter.record(unit, task, settings, signal) :
-        await this.adapter.fill(unit, task, signal);
+        await this.adapter.fill(unit, task, settings, signal);
       check(signal); values.set(String(task.question.id), value);
       this.update({ completed: values.size });
       await sleep(settings.intervalMs, signal);

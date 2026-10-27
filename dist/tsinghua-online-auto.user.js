@@ -1263,6 +1263,7 @@
       this.components = components2;
     }
     rechallengeCounts = /* @__PURE__ */ new Map();
+    visited = /* @__PURE__ */ new Set();
     discover() {
       if (!legacyRoute()) return [];
       return this.components().filter(({ component: c, root }) => root.matches("app-course-task-stu") && shown(root) && root.isConnected && typeof c.loadDoRecord === "function" && /^[\w-]+$/.test(String(c.pageId || ""))).map(({ component: c, root }) => ({
@@ -1890,6 +1891,8 @@ ${(q.stem || "").slice(0, 3e3)}
         text: text(object(option).val)
       })) : [];
       const blanks = Array.isArray(task.value) ? task.value.map(object).map((blank) => ({ idx: String(blank.idx) })) : [];
+      const pageRoot = root.closest("app-course-task-stu") ?? root;
+      const pageText = (pageRoot.innerText || pageRoot.textContent || root.innerText || root.textContent || "").slice(0, 8e3);
       const catalog = Number(ext.legacyType) === 11 ? {
         targets: (Array.isArray(ext.targets) ? ext.targets : []).map((target) => ({ id: String(object(target).id), text: String(object(target).text ?? "") })),
         items: (Array.isArray(ext.items) ? ext.items : []).map((item) => ({ id: String(object(item).id), text: String(object(item).text ?? "") }))
@@ -1899,8 +1902,8 @@ ${(q.stem || "").slice(0, 3e3)}
 题型: ${q.type}（${task.kind}）
 题目说明: ${q.instruction || ""}
 对话（[[空位ID]] 为待填空格）: ${dialogue.length ? "\n" + dialogue.join("\n") : "（无）"}
-页面可见文本:
-${(root.innerText || "").slice(0, 6e3)}
+页面可见文本（含词库/图片说明）:
+${pageText}
 选项: ${JSON.stringify(options)}
 空位: ${JSON.stringify(blanks)}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
@@ -1910,6 +1913,7 @@ ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
 ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空的 answer 必须使用选项中的 ID。" : ""}
 ${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
 ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个目标，全部项目都要分配。" : ""}
+${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。" : ""}
 必须严格回答当前题目。`;
       const result = await answerWithAi(prompt, settings, signal);
       return { ...task, value: this.validateAiValue(task, result) };
@@ -2058,6 +2062,7 @@ ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个
     async next(unit, signal, settings, beforeRechallenge) {
       check(signal);
       this.assertContext(unit);
+      this.visited.add(unit.key);
       const failed = this.goalFailure();
       if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
       const successModal = this.challengeModal();
@@ -2067,15 +2072,17 @@ ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个
         await sleep(300, signal);
       }
       const right = [...document.querySelectorAll(".page-next")].find((el) => !!el.querySelector('img[src*="tx_page_right"]') && shown(el));
-      if (!right || right.getAttribute("aria-disabled") === "true" || right.classList.contains("disabled")) return void 0;
+      if (!right || right.getAttribute("aria-disabled") === "true" || right.classList.contains("disabled")) {
+        return this.catalogNext(unit, signal);
+      }
       const oldKey = unit.key;
       right.click();
       try {
         await until(() => {
           const failure2 = this.goalFailure();
           if (failure2) throw new Halt("GOAL_FAILURE_DETECTED", failure2);
-          const found = this.discover()[0];
-          return found && found.key !== oldKey ? found : void 0;
+          const found2 = this.discover()[0];
+          return found2 && found2.key !== oldKey ? found2 : void 0;
         }, 2e4, signal);
       } catch (error) {
         if (error instanceof Halt && error.code === "GOAL_FAILURE_DETECTED") {
@@ -2083,7 +2090,53 @@ ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个
         }
         throw error;
       }
-      return this.discover()[0];
+      const found = this.discover()[0];
+      if (found && this.visited.has(found.key)) {
+        const moved = await this.catalogNext(unit, signal);
+        if (moved && !this.visited.has(moved.key)) return moved;
+      }
+      if (found) this.visited.add(found.key);
+      return found;
+    }
+    // Walk the course catalog in display order and open the next clickable page after the
+    // current one. Locked pages (isClick=false) are skipped, so a failed goal still stops.
+    async catalogNext(unit, signal) {
+      const c = this.instance(unit);
+      const list = c.courseStudyService?.catalogList?.[c.courseId];
+      if (!list) return void 0;
+      const pages = [];
+      const walk = (node) => {
+        const children = Array.isArray(node.children) ? node.children : [];
+        for (const raw of children) {
+          const child = object(raw);
+          if (typeof child.key === "string" && child.pageId) {
+            pages.push({ key: child.key, click: child.isClick !== false, vis: Number(child.isVisiable ?? 1) });
+          }
+          if (Array.isArray(child.children) && child.children.length) walk(child);
+        }
+      };
+      walk(object(list));
+      const current = routePath().split("/").filter(Boolean).pop() || "";
+      const index = pages.findIndex((page2) => page2.key === current);
+      if (index < 0) return void 0;
+      const next = pages.slice(index + 1).find((page2) => page2.click && page2.vis !== 2);
+      if (!next) return void 0;
+      runInLegacyZone(() => {
+        void c.router?.navigate?.(
+          ["/course-study-student", String(c.textbookId), String(c.courseId), String(c.userId), next.key]
+        );
+      });
+      try {
+        await until(() => {
+          const found2 = this.discover()[0];
+          return found2 && found2.key !== unit.key ? found2 : void 0;
+        }, 2e4, signal);
+      } catch {
+        return void 0;
+      }
+      const found = this.discover()[0];
+      if (found) this.visited.add(found.key);
+      return found;
     }
     async rechallenge(unit, signal, reason, settings, beforeRechallenge) {
       if (!settings?.autoRechallenge) throw new Halt("GOAL_FAILED", reason);
@@ -2094,6 +2147,7 @@ ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个
       const again = [...modal.modal.querySelectorAll("button")].find((button) => /rechallenge/i.test(button.textContent || ""));
       if (!again) throw new Halt("GOAL_FAILED", `${reason}；未找到 Rechallenge 按钮`);
       this.rechallengeCounts.set(unit.key, count);
+      this.visited.clear();
       beforeRechallenge?.();
       again.click();
       await until(() => {

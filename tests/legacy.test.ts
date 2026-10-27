@@ -551,6 +551,29 @@ describe('legacy production route regression', () => {
     expect(value).toEqual([{ idx: 't-ind', answers: ['i-2'] }, { idx: 't-team', answers: ['i-0'] },
       { idx: 't-both', answers: ['i-1', 'i-3'] }]);
   });
+  it('gives the AI the whole page so word boxes outside the child question are included', async () => {
+    const exercise: any = { id: 'q-15', type: 15, audioScript: '<p>Speaker A: I like running.</p>', exerciseList: [
+      { id: 'c-1', type: 5, fillBlanks: [{ id: 'b-1', answer: 'a marathon' }] }] };
+    document.body.innerHTML = '<app-course-task-stu><div class="word-box">golf volleyball a marathon the soccer team</div>' +
+      '<lib-fill-blank-exercise-cs-study><span contenteditable="true" id="a-b-1"></span></lib-fill-blank-exercise-cs-study>' +
+      '<button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.querySelector('lib-fill-blank-exercise-cs-study') as HTMLElement;
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Composite',
+      doRecord: { type: 15, answer: {} }, loadDoRecord() {} };
+    const leaf: any = { status: 1, exercise: exercise.exerciseList[0], doRecord: { type: 5, answer: {} },
+      doRecordChange: { emit: vi.fn() } };
+    const span = host.querySelector<HTMLElement>('#a-b-1')!;
+    span.addEventListener('input', () => { leaf.doRecord.answer['b-1'] = { id: 'b-1', content: span.innerText }; });
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ fill: [{ idx: 'b-1', answer: 'a marathon' }] });
+    await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('a marathon'), expect.anything(), expect.anything());
+    expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('词库'), expect.anything(), expect.anything());
+  });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());
     await controller.start(f.unit, { ...defaults, intervalMs: 0 });
@@ -597,6 +620,26 @@ describe('legacy production route regression', () => {
       await controller.start(f.unit, defaults);
       expect(controller.progress.status).toBe('paused'); expect(f.submit).not.toHaveBeenCalled();
     }
+  });
+  it('falls back to the next catalog section when the right arrow would loop', async () => {
+    history.replaceState({}, '', '/legacy/course-study-student/10/20/30/key-1');
+    document.body.innerHTML = '<app-course-task-stu><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const c: any = { courseId: 20, pageId: 'page-1', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: { id: 'q1', type: 24, fillBlanks: [], dragged: [] },
+      pageTitle: 'A', loadDoRecord() {}, textbookId: 10,
+      courseStudyService: { catalogList: { 20: { children: [
+        { key: 'key-1', pageId: 'page-1', isClick: true, isVisiable: 1, children: [] },
+        { key: 'key-2', pageId: 'page-2', isClick: true, isVisiable: 1, children: [] },
+      ] } } },
+      router: { navigate: vi.fn(async () => {
+        history.replaceState({}, '', '/legacy/course-study-student/10/20/30/key-2'); c.pageId = 'page-2';
+      }) } };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }]);
+    const unit = adapter.discover()[0];
+    const next = await adapter.next(unit, signal());
+    expect(c.router.navigate).toHaveBeenCalledWith(['/course-study-student', '10', '20', '30', 'key-2']);
+    expect(next?.contentId).toBe('page-2');
   });
   it('pauses continuous next on a failed goal challenge instead of hanging', async () => {
     const f = fixture();

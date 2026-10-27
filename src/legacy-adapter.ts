@@ -181,6 +181,59 @@ export class LegacyAdapter implements Adapter {
   }
   private async recordRolePlay(unit: Unit, task: Task, settings: Settings, signal: AbortSignal,
     c: LegacyComponent, root: HTMLElement): Promise<unknown> {
+    const taskExt = object(task.question.extension);
+    const nativeExt = object(legacyRoleExtension(c.exercise));
+    const rawItems = Array.isArray(taskExt.sentItems) && taskExt.sentItems.length ? taskExt.sentItems :
+      (Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : []);
+    const items = rawItems.map((value): Record<string, unknown> => {
+      const item = object(value);
+      return { ...item, id: item.id ?? item.idx };
+    });
+    const roles = (Array.isArray(taskExt.roles) && taskExt.roles.length ? taskExt.roles :
+      (Array.isArray(nativeExt.roles) ? nativeExt.roles : [])).map(object);
+    const roleStart = root.querySelector<HTMLButtonElement>('.lib-role-select-start button');
+    if (!items.length || !roles.length || typeof c.selectRole !== 'function' ||
+        (typeof c.start !== 'function' && !roleStart)) {
+      throw new Halt('RECORDING_DOM', '角色扮演题缺少角色、句子或启动控件');
+    }
+    const roleId = c.doRecord?.roleId ||
+      roles.find(role => items.some(item => String(item.roleId) === String(role.id)))?.id || roles[0].id;
+    if (!roleId) throw new Halt('RECORDING_DOM', '角色扮演题没有可选角色');
+    const target = items.filter(item => String(item.roleId) === String(roleId));
+    if (!target.length || target.some(item => !item.id) ||
+        new Set(target.map(item => String(item.id))).size !== target.length) {
+      throw new Halt('RECORDING_DOM', '所选角色的句子标识缺失、重复或无法匹配');
+    }
+    const complete = () => target.every(item => {
+      const answer = object(object(object(c.doRecord).answer)[String(item.id)]);
+      return typeof answer.recordAudio === 'string' && !!answer.recordAudio;
+    });
+    this.run(unit, () => c.selectRole(roleId));
+    if (complete()) return legacyValue(task.question, c.doRecord);
+
+    if (settings.rolePlayExampleAudio) {
+      const urls = await Promise.all(target.map(item => this.exampleAudioUrl(c, item, settings, signal)));
+      check(signal); this.editable(unit);
+      this.run(unit, () => {
+        const record = object(c.doRecord);
+        if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+        const answers = record.answer as Record<string, unknown>;
+        const targetIds = new Set(target.map(item => String(item.id)));
+        for (const id of Object.keys(answers)) {
+          if (!targetIds.has(id) && !object(answers[id]).recordAudio) delete answers[id];
+        }
+        target.forEach((item, index) => {
+          const id = String(item.id);
+          answers[id] = { ...roleAnswer(), ...object(answers[id]), recordAudio: urls[index] };
+        });
+        if (typeof c.dataChange === 'function') c.dataChange();
+        else c.doRecordChange.emit(record);
+      });
+      await sleep(80, signal); this.editable(unit);
+      if (!complete()) throw new Halt('EXAMPLE_AUDIO', '示例音频已解析，但网页未接收角色扮演作答，请导出诊断');
+      return legacyValue(task.question, c.doRecord);
+    }
+
     if (!navigator.mediaDevices?.getUserMedia) throw new Halt('MICROPHONE', '浏览器未提供麦克风');
     let cancelled = false;
     try {
@@ -188,43 +241,60 @@ export class LegacyAdapter implements Adapter {
         if (cancelled) s.getTracks().forEach(t => t.stop()); return s;
       }), settings.timeoutMs, signal);
       stream.getTracks().forEach(t => t.stop());
-    } catch { throw new Halt('MICROPHONE', '麦克风权限被拒绝、取消或设备不可用'); }
-    finally { cancelled = true; }
-    const taskExt = object(task.question.extension);
-    const nativeExt = object(legacyRoleExtension(c.exercise));
-    const items = (Array.isArray(taskExt.sentItems) ? taskExt.sentItems :
-      (Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : [])).map(object);
-    const roles = (Array.isArray(taskExt.roles) ? taskExt.roles :
-      (Array.isArray(nativeExt.roles) ? nativeExt.roles : [])).map(object);
-    if (!items.length || !roles.length || typeof c.selectRole !== 'function' ||
-        typeof c.start !== 'function' || typeof c.playVadio !== 'function') {
-      throw new Halt('RECORDING_DOM', '角色扮演题缺少角色、句子或启动控件');
-    }
-    const roleId = c.doRecord?.roleId || roles[0].id;
-    if (!roleId) throw new Halt('RECORDING_DOM', '角色扮演题没有可选角色');
-    this.run(unit, () => c.selectRole(roleId));
-    const roleStart = root.querySelector<HTMLButtonElement>('.lib-role-select-start button');
+    } catch (error) {
+      if (error instanceof Halt && error.code === 'CANCELLED') throw error;
+      throw new Halt('MICROPHONE', '麦克风权限被拒绝、取消或设备不可用');
+    } finally { cancelled = true; }
+    this.editable(unit);
     if (roleStart) roleStart.click();
     else this.run(unit, () => c.start());
-    await until(() => c.isClose === true || c.readingIndex != null ? true : undefined, 12_000, signal);
-    for (const item of items) {
-      check(signal); this.editable(unit);
-      const answer: any = object(c.doRecord.answer)[String(item.id)] || {};
-      if (answer.recordAudio) continue;
-      const target = [...root.querySelectorAll<HTMLElement>('[data-id], .lib-role-play-item, .lib-role-play-sentence')]
-        .find(el => el.getAttribute('data-id') === String(item.id) || el.textContent?.includes(String(item.text || '').slice(0, 18)));
-      const recordButton = target?.querySelector<HTMLElement>('img[title="录音"],button[title="录音"]') ||
-        root.querySelector<HTMLElement>(`[data-id="${String(item.id).replace(/"/g, '')}"] img`);
-      if (!recordButton && typeof c.playVadio !== 'function') throw new Halt('RECORD_CONTROL', `角色扮演句子 ${item.id} 没有录音控件`);
-      if (typeof c.playVadio === 'function') this.run(unit, () => c.playVadio(item));
-      else recordButton!.click();
-      const timeout = Math.min(180_000, (Number(item.audioTime) > 35 ? 39 : Number(item.audioTime) || 9) * 1000 + 10_000);
-      await until(() => {
-        const current: any = object(c.doRecord.answer)[String(item.id)];
-        return current && current.recordAudio ? true : undefined;
-      }, timeout, signal);
+    // Let the site's own changeAudioUrl() play the other role and start each of the
+    // selected role's Chivox recordings. Do not call playVadio() per sentence here:
+    // that toggles sample playback and races the site's recorder state machine.
+    const budget = Math.min(600_000, items.reduce((total, item) => {
+      const seconds = Number(item.audioTime);
+      return total + Math.max(3, Math.min(45, Number.isFinite(seconds) && seconds > 0 ? seconds : 9)) * 1_000;
+    }, 0) + 30_000);
+    try {
+      await until(() => complete() ? true : undefined, budget, signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      const missing = target.filter(item => {
+        const answer = object(object(object(c.doRecord).answer)[String(item.id)]);
+        return typeof answer.recordAudio !== 'string' || !answer.recordAudio;
+      }).map(item => String(item.id));
+      throw new Halt('RECORD_TIMEOUT', `等待角色扮演录音超时（未完成句子：${missing.join('、')}），请检查麦克风和页面提示`);
     }
     return legacyValue(task.question, c.doRecord);
+  }
+  private async exampleAudioUrl(c: LegacyComponent, item: Record<string, unknown>, settings: Settings,
+    signal: AbortSignal): Promise<string> {
+    const raw = item.audio ?? item.audioUrl ?? item.resId;
+    if (typeof raw === 'string') {
+      const direct = absoluteAudio(raw);
+      if (direct) return direct;
+    }
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new Halt('EXAMPLE_AUDIO', `角色扮演句子 ${String(item.id)} 缺少示例音频`);
+    }
+    const service = c.getWebUrlService ?? c.webUrlService;
+    const source = typeof service?.getResUrl === 'function' ? service.getResUrl(raw, 2) : undefined;
+    if (typeof source?.subscribe !== 'function') {
+      throw new Halt('EXAMPLE_AUDIO', '页面未提供示例音频解析服务，请关闭“角色扮演使用示例音频”后重试');
+    }
+    let subscription: { unsubscribe(): void } | undefined;
+    try {
+      const response = await bounded(new Promise<unknown>((resolve, reject) => {
+        subscription = source.subscribe({ next: resolve, error: reject });
+      }), settings.timeoutMs, signal);
+      const url = object(response).url;
+      if (typeof url === 'string' && url.trim()) return new URL(url, location.href).href;
+      throw new Halt('EXAMPLE_AUDIO', `角色扮演句子 ${String(item.id)} 的示例音频地址为空`);
+    } catch (error) {
+      if (error instanceof Halt) throw error;
+      const status = Number(object(error).status);
+      throw new Halt('EXAMPLE_AUDIO', `角色扮演示例音频解析失败${status ? `（HTTP ${status}）` : ''}，请检查网络或关闭示例音频模式`);
+    } finally { subscription?.unsubscribe(); }
   }
   async submit(unit: Unit, signal: AbortSignal): Promise<void> {
     check(signal); this.editable(unit);
@@ -246,6 +316,20 @@ export class LegacyAdapter implements Adapter {
     }, 20_000, signal);
     return this.discover()[0];
   }
+}
+
+function roleAnswer(): Record<string, unknown> {
+  return { score: 0, accuracy: 0, fluency: 0, senseGroup: 0, speed: 0, stress: 0,
+    integrity: 0, rhythm: 0, pron: 0, recordAudio: '', words: [], ccode: {}, result: '' };
+}
+
+function absoluteAudio(value: string): string {
+  const raw = value.trim();
+  if (!raw) return '';
+  if (/^(https?:)?\/\//i.test(raw) || raw.startsWith('/') || /\.(mp3|wav|m4a|aac)(\?|#|$)/i.test(raw)) {
+    try { return new URL(raw, location.href).href; } catch { return raw; }
+  }
+  return '';
 }
 
 function legacyRoleExtension(exercise: unknown): unknown {

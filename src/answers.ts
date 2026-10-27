@@ -139,11 +139,21 @@ export function hasCompleteResponse(q: Question, value: unknown): boolean {
   if (q.type === 'oral_simple_speak') return typeof object(v).audio === 'string' && !!object(v).audio;
   if (q.type === 'legacy_9') {
     const items = object(q.extension).sentItems;
-    if (!Array.isArray(items) || !items.length || !Array.isArray(v) || v.length !== items.length) return false;
-    return items.every(item => {
-      const idx = String(object(item).idx), matches = v.map(object).filter(a => String(a.idx) === idx);
-      return matches.length === 1 && typeof matches[0].audio === 'string' && !!matches[0].audio;
-    });
+    if (!Array.isArray(items) || !items.length || !Array.isArray(v) || !v.length) return false;
+    const answers = v.map(object);
+    if (answers.some(a => typeof a.audio !== 'string' || !a.audio)) return false;
+    const itemById = new Map(items.map(item => [String(object(item).idx), object(item)]));
+    if (itemById.size !== items.length) return false;
+    const answeredIds = new Set(answers.map(a => String(a.idx)));
+    if (answeredIds.size !== answers.length || [...answeredIds].some(idx => !itemById.has(idx))) return false;
+    // The website only asks the student to record the selected role's lines. Saved
+    // records may omit roleId, so infer the role from the answered sentence IDs.
+    if (items.every(item => answeredIds.has(String(object(item).idx)))) return true;
+    const roleIds = new Set([...answeredIds].map(idx => String(itemById.get(idx)?.roleId ?? '')));
+    if (roleIds.size !== 1) return false;
+    const roleId = [...roleIds][0];
+    const expected = items.filter(item => String(object(item).roleId ?? '') === roleId);
+    return expected.length > 0 && expected.every(item => answeredIds.has(String(object(item).idx)));
   }
   if (q.type === 'fill_base' || q.type === 'oral_follow_along' || q.type === 'oral_vocabulary_learning') {
     const ext = parse(q.extension);

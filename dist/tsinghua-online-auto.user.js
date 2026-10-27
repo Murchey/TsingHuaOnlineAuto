@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.1.3
-// @description  日常练习填写、真实麦克风录音、提交核对及故障诊断
+// @version      0.1.4
+// @description  日常练习填写、角色扮演示例音频代录、真实麦克风录音、提交核对及故障诊断
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
 // @run-at       document-start
@@ -18,6 +18,7 @@
   var defaults = {
     allLoaded: false,
     recordingSeconds: 10,
+    rolePlayExampleAudio: true,
     timeoutMs: 3e4,
     intervalMs: 350
   };
@@ -211,11 +212,19 @@
     if (q.type === "oral_simple_speak") return typeof object(v).audio === "string" && !!object(v).audio;
     if (q.type === "legacy_9") {
       const items = object(q.extension).sentItems;
-      if (!Array.isArray(items) || !items.length || !Array.isArray(v) || v.length !== items.length) return false;
-      return items.every((item) => {
-        const idx = String(object(item).idx), matches = v.map(object).filter((a) => String(a.idx) === idx);
-        return matches.length === 1 && typeof matches[0].audio === "string" && !!matches[0].audio;
-      });
+      if (!Array.isArray(items) || !items.length || !Array.isArray(v) || !v.length) return false;
+      const answers = v.map(object);
+      if (answers.some((a) => typeof a.audio !== "string" || !a.audio)) return false;
+      const itemById = new Map(items.map((item) => [String(object(item).idx), object(item)]));
+      if (itemById.size !== items.length) return false;
+      const answeredIds = new Set(answers.map((a) => String(a.idx)));
+      if (answeredIds.size !== answers.length || [...answeredIds].some((idx) => !itemById.has(idx))) return false;
+      if (items.every((item) => answeredIds.has(String(object(item).idx)))) return true;
+      const roleIds = new Set([...answeredIds].map((idx) => String(itemById.get(idx)?.roleId ?? "")));
+      if (roleIds.size !== 1) return false;
+      const roleId = [...roleIds][0];
+      const expected = items.filter((item) => String(object(item).roleId ?? "") === roleId);
+      return expected.length > 0 && expected.every((item) => answeredIds.has(String(object(item).idx)));
     }
     if (q.type === "fill_base" || q.type === "oral_follow_along" || q.type === "oral_vocabulary_learning") {
       const ext = parse(q.extension);
@@ -608,6 +617,7 @@
           idx: object(s).id,
           roleId: object(s).roleId,
           audioTime: object(s).audioTime,
+          audio: object(s).audio ?? object(s).audioUrl ?? object(s).resId,
           text: richText(object(s).styleText ?? object(s).text ?? object(s).content)
         }))
       };
@@ -877,6 +887,54 @@
       }
     }
     async recordRolePlay(unit, task, settings, signal, c, root) {
+      const taskExt = object(task.question.extension);
+      const nativeExt = object(legacyRoleExtension(c.exercise));
+      const rawItems = Array.isArray(taskExt.sentItems) && taskExt.sentItems.length ? taskExt.sentItems : Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : [];
+      const items = rawItems.map((value) => {
+        const item = object(value);
+        return { ...item, id: item.id ?? item.idx };
+      });
+      const roles = (Array.isArray(taskExt.roles) && taskExt.roles.length ? taskExt.roles : Array.isArray(nativeExt.roles) ? nativeExt.roles : []).map(object);
+      const roleStart = root.querySelector(".lib-role-select-start button");
+      if (!items.length || !roles.length || typeof c.selectRole !== "function" || typeof c.start !== "function" && !roleStart) {
+        throw new Halt("RECORDING_DOM", "角色扮演题缺少角色、句子或启动控件");
+      }
+      const roleId = c.doRecord?.roleId || roles.find((role) => items.some((item) => String(item.roleId) === String(role.id)))?.id || roles[0].id;
+      if (!roleId) throw new Halt("RECORDING_DOM", "角色扮演题没有可选角色");
+      const target = items.filter((item) => String(item.roleId) === String(roleId));
+      if (!target.length || target.some((item) => !item.id) || new Set(target.map((item) => String(item.id))).size !== target.length) {
+        throw new Halt("RECORDING_DOM", "所选角色的句子标识缺失、重复或无法匹配");
+      }
+      const complete = () => target.every((item) => {
+        const answer = object(object(object(c.doRecord).answer)[String(item.id)]);
+        return typeof answer.recordAudio === "string" && !!answer.recordAudio;
+      });
+      this.run(unit, () => c.selectRole(roleId));
+      if (complete()) return legacyValue(task.question, c.doRecord);
+      if (settings.rolePlayExampleAudio) {
+        const urls = await Promise.all(target.map((item) => this.exampleAudioUrl(c, item, settings, signal)));
+        check(signal);
+        this.editable(unit);
+        this.run(unit, () => {
+          const record = object(c.doRecord);
+          if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+          const answers = record.answer;
+          const targetIds = new Set(target.map((item) => String(item.id)));
+          for (const id2 of Object.keys(answers)) {
+            if (!targetIds.has(id2) && !object(answers[id2]).recordAudio) delete answers[id2];
+          }
+          target.forEach((item, index) => {
+            const id2 = String(item.id);
+            answers[id2] = { ...roleAnswer(), ...object(answers[id2]), recordAudio: urls[index] };
+          });
+          if (typeof c.dataChange === "function") c.dataChange();
+          else c.doRecordChange.emit(record);
+        });
+        await sleep(80, signal);
+        this.editable(unit);
+        if (!complete()) throw new Halt("EXAMPLE_AUDIO", "示例音频已解析，但网页未接收角色扮演作答，请导出诊断");
+        return legacyValue(task.question, c.doRecord);
+      }
       if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
       let cancelled = false;
       try {
@@ -885,42 +943,60 @@
           return s;
         }), settings.timeoutMs, signal);
         stream.getTracks().forEach((t) => t.stop());
-      } catch {
+      } catch (error) {
+        if (error instanceof Halt && error.code === "CANCELLED") throw error;
         throw new Halt("MICROPHONE", "麦克风权限被拒绝、取消或设备不可用");
       } finally {
         cancelled = true;
       }
-      const taskExt = object(task.question.extension);
-      const nativeExt = object(legacyRoleExtension(c.exercise));
-      const items = (Array.isArray(taskExt.sentItems) ? taskExt.sentItems : Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : []).map(object);
-      const roles = (Array.isArray(taskExt.roles) ? taskExt.roles : Array.isArray(nativeExt.roles) ? nativeExt.roles : []).map(object);
-      if (!items.length || !roles.length || typeof c.selectRole !== "function" || typeof c.start !== "function" || typeof c.playVadio !== "function") {
-        throw new Halt("RECORDING_DOM", "角色扮演题缺少角色、句子或启动控件");
-      }
-      const roleId = c.doRecord?.roleId || roles[0].id;
-      if (!roleId) throw new Halt("RECORDING_DOM", "角色扮演题没有可选角色");
-      this.run(unit, () => c.selectRole(roleId));
-      const roleStart = root.querySelector(".lib-role-select-start button");
+      this.editable(unit);
       if (roleStart) roleStart.click();
       else this.run(unit, () => c.start());
-      await until(() => c.isClose === true || c.readingIndex != null ? true : void 0, 12e3, signal);
-      for (const item of items) {
-        check(signal);
-        this.editable(unit);
-        const answer = object(c.doRecord.answer)[String(item.id)] || {};
-        if (answer.recordAudio) continue;
-        const target = [...root.querySelectorAll("[data-id], .lib-role-play-item, .lib-role-play-sentence")].find((el) => el.getAttribute("data-id") === String(item.id) || el.textContent?.includes(String(item.text || "").slice(0, 18)));
-        const recordButton = target?.querySelector('img[title="录音"],button[title="录音"]') || root.querySelector(`[data-id="${String(item.id).replace(/"/g, "")}"] img`);
-        if (!recordButton && typeof c.playVadio !== "function") throw new Halt("RECORD_CONTROL", `角色扮演句子 ${item.id} 没有录音控件`);
-        if (typeof c.playVadio === "function") this.run(unit, () => c.playVadio(item));
-        else recordButton.click();
-        const timeout = Math.min(18e4, (Number(item.audioTime) > 35 ? 39 : Number(item.audioTime) || 9) * 1e3 + 1e4);
-        await until(() => {
-          const current = object(c.doRecord.answer)[String(item.id)];
-          return current && current.recordAudio ? true : void 0;
-        }, timeout, signal);
+      const budget = Math.min(6e5, items.reduce((total, item) => {
+        const seconds = Number(item.audioTime);
+        return total + Math.max(3, Math.min(45, Number.isFinite(seconds) && seconds > 0 ? seconds : 9)) * 1e3;
+      }, 0) + 3e4);
+      try {
+        await until(() => complete() ? true : void 0, budget, signal);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        const missing = target.filter((item) => {
+          const answer = object(object(object(c.doRecord).answer)[String(item.id)]);
+          return typeof answer.recordAudio !== "string" || !answer.recordAudio;
+        }).map((item) => String(item.id));
+        throw new Halt("RECORD_TIMEOUT", `等待角色扮演录音超时（未完成句子：${missing.join("、")}），请检查麦克风和页面提示`);
       }
       return legacyValue(task.question, c.doRecord);
+    }
+    async exampleAudioUrl(c, item, settings, signal) {
+      const raw = item.audio ?? item.audioUrl ?? item.resId;
+      if (typeof raw === "string") {
+        const direct = absoluteAudio(raw);
+        if (direct) return direct;
+      }
+      if (typeof raw !== "string" || !raw.trim()) {
+        throw new Halt("EXAMPLE_AUDIO", `角色扮演句子 ${String(item.id)} 缺少示例音频`);
+      }
+      const service = c.getWebUrlService ?? c.webUrlService;
+      const source = typeof service?.getResUrl === "function" ? service.getResUrl(raw, 2) : void 0;
+      if (typeof source?.subscribe !== "function") {
+        throw new Halt("EXAMPLE_AUDIO", "页面未提供示例音频解析服务，请关闭“角色扮演使用示例音频”后重试");
+      }
+      let subscription;
+      try {
+        const response = await bounded(new Promise((resolve, reject) => {
+          subscription = source.subscribe({ next: resolve, error: reject });
+        }), settings.timeoutMs, signal);
+        const url = object(response).url;
+        if (typeof url === "string" && url.trim()) return new URL(url, location.href).href;
+        throw new Halt("EXAMPLE_AUDIO", `角色扮演句子 ${String(item.id)} 的示例音频地址为空`);
+      } catch (error) {
+        if (error instanceof Halt) throw error;
+        const status = Number(object(error).status);
+        throw new Halt("EXAMPLE_AUDIO", `角色扮演示例音频解析失败${status ? `（HTTP ${status}）` : ""}，请检查网络或关闭示例音频模式`);
+      } finally {
+        subscription?.unsubscribe();
+      }
     }
     async submit(unit, signal) {
       check(signal);
@@ -943,6 +1019,35 @@
       return this.discover()[0];
     }
   };
+  function roleAnswer() {
+    return {
+      score: 0,
+      accuracy: 0,
+      fluency: 0,
+      senseGroup: 0,
+      speed: 0,
+      stress: 0,
+      integrity: 0,
+      rhythm: 0,
+      pron: 0,
+      recordAudio: "",
+      words: [],
+      ccode: {},
+      result: ""
+    };
+  }
+  function absoluteAudio(value) {
+    const raw = value.trim();
+    if (!raw) return "";
+    if (/^(https?:)?\/\//i.test(raw) || raw.startsWith("/") || /\.(mp3|wav|m4a|aac)(\?|#|$)/i.test(raw)) {
+      try {
+        return new URL(raw, location.href).href;
+      } catch {
+        return raw;
+      }
+    }
+    return "";
+  }
   function legacyRoleExtension(exercise) {
     const e = object(exercise);
     const findArray = (keys) => {
@@ -1246,7 +1351,8 @@
           <label for="units">当前练习</label><select id="units" aria-label="当前练习"></select>
           <div class="row"><label><input id="all" type="checkbox"> 处理本章节全部已加载练习块</label></div>
           <div class="row"><label>口语录音时长 <input id="seconds" type="number" min="3" max="180" step="1"> 秒</label></div>
-          <p class="hint">录音使用真实麦克风；跟读和单词题遵循页面时长。答案缺失时暂停。仅处理日常练习。</p>
+          <div class="row"><label><input id="exampleAudio" type="checkbox"> 角色扮演使用示例音频代替麦克风（不生成评分）</label></div>
+          <p class="hint">角色扮演默认把原题示例音频作为录音结果提交；关闭后使用真实麦克风。跟读和单词题遵循页面时长。答案缺失时暂停。仅处理日常练习。</p>
           <progress id="progress" class="progress" value="0" max="1"></progress><div class="hint" id="counts"></div>
           <div class="actions row"><button class="primary" id="start">开始</button><button id="pause">暂停</button><button id="stop">停止</button></div>
           <div id="pending" class="pending"></div>
@@ -1256,9 +1362,10 @@
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.1.3";
+      this.el("version").textContent = false ? "dev" : "0.1.4";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
+      this.input("exampleAudio").checked = this.settings.rolePlayExampleAudio;
       this.el("collapse").addEventListener("click", () => {
         this.el("panel").classList.add("hidden");
         this.el("mini").classList.remove("hidden");
@@ -1277,7 +1384,8 @@
           this.settings = {
             ...defaults,
             allLoaded: this.input("all").checked,
-            recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds
+            recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds,
+            rolePlayExampleAudio: this.input("exampleAudio").checked
           };
           this.input("seconds").value = String(this.settings.recordingSeconds);
           this.store.saveSettings(this.settings);
@@ -1396,7 +1504,7 @@
       const progress = this.el("progress");
       progress.max = Math.max(p.total, 1);
       progress.value = p.completed;
-      for (const id2 of ["units", "seconds", "all", "refresh", "reset"]) this.input(id2).disabled = busy;
+      for (const id2 of ["units", "seconds", "all", "exampleAudio", "refresh", "reset"]) this.input(id2).disabled = busy;
       this.el("start").disabled = busy || !this.units.length;
       this.el("start").textContent = p.status === "paused" || p.status === "stopped" ? "继续" : "开始";
       this.el("pause").disabled = !busy;
@@ -1419,7 +1527,7 @@
       } catch {
       }
       return {
-        version: false ? "dev" : "0.1.3",
+        version: false ? "dev" : "0.1.4",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),
@@ -1465,6 +1573,7 @@
         return {
           allLoaded: raw.allLoaded === true,
           recordingSeconds: typeof raw.recordingSeconds === "number" && Number.isFinite(raw.recordingSeconds) ? Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
+          rolePlayExampleAudio: typeof raw.rolePlayExampleAudio === "boolean" ? raw.rolePlayExampleAudio : defaults.rolePlayExampleAudio,
           timeoutMs: defaults.timeoutMs,
           intervalMs: defaults.intervalMs
         };

@@ -19,6 +19,7 @@ describe('independent panel lifecycle', () => {
     const { panel, shadow } = make();
     expect(panel.host.isConnected).toBe(true);
     expect(shadow.getElementById('message')?.textContent).toContain('助手已运行');
+    expect((shadow.getElementById('exampleAudio') as HTMLInputElement).checked).toBe(true);
     expect((shadow.getElementById('start') as HTMLButtonElement).disabled).toBe(true);
   });
   it('waits for body at document-start and recovers if the SPA removes the host', async () => {

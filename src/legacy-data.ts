@@ -34,6 +34,7 @@ export function legacyQuestion(exercise: unknown): Question {
       roles: roles.map(r => ({ id: object(r).id, name: object(r).name })),
       sentItems: sentItems.map(s => ({
         idx: object(s).id, roleId: object(s).roleId, audioTime: object(s).audioTime,
+        audio: object(s).audio ?? object(s).audioUrl ?? object(s).resId,
         text: richText(object(s).styleText ?? object(s).text ?? object(s).content),
       })),
     };

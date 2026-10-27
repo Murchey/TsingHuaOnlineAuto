@@ -51,15 +51,30 @@ describe('legacy production route regression', () => {
     const broken = exercise(); broken.fillBlanks[0].answer = 'not-an-option';
     expect(() => legacyData({ exercise: broken, submitNum: 0 })).toThrow('拖拽填空');
   });
-  it('plans role-play type 9 as recording and recognizes completed sentence audio', () => {
-    const role = { id: 'role-1', name: 'Adrian' }, roleExercise = { id: 'role-q', type: 9,
-      roles: [role], sentItems: [{ id: 'sent-1', roleId: 'role-1', audioTime: '3', styleText: { paragraphs: [{ contentItems: [{ text: 'Hello' }] }] } }] };
+  it('plans role-play type 9 as recording and recognizes only the selected role as complete', () => {
+    const roleExercise = { id: 'role-q', type: 9,
+      roles: [{ id: 'role-1', name: 'Adrian' }, { id: 'role-2', name: 'Beth' }],
+      sentItems: [
+        { id: 'sent-1', roleId: 'role-1', audio: 'res-1', audioTime: '3', styleText: { paragraphs: [{ contentItems: [{ text: 'Hello' }] }] } },
+        { id: 'sent-2', roleId: 'role-2', audio: 'res-2', audioTime: '3' },
+        { id: 'sent-3', roleId: 'role-1', audio: 'res-3', audioTime: '4' },
+      ] };
     const empty = legacyData({ exercise: roleExercise, submitNum: 0 });
     expect(planTasks(empty)[0].kind).toBe('recording');
-    const saved = legacyData({ exercise: roleExercise, submitNum: 1, doRecord: { type: 9, roleId: 'role-1', answer: {
-      'sent-1': { recordAudio: 'audio-uuid', words: [{ type: 1 }] },
+    expect((planTasks(empty)[0].question.extension as any).sentItems[0].audio).toBe('res-1');
+    const selected = legacyData({ exercise: roleExercise, submitNum: 1, doRecord: { type: 9, roleId: 'role-1', answer: {
+      'sent-1': { recordAudio: 'audio-1', words: [{ type: 1 }] },
+      'sent-3': { recordAudio: 'audio-3', words: [{ type: 1 }] },
     } } });
-    expect(hasCompleteResponse(saved.questionVOList[0], saved.questionAnswerItemVOList![0].userAnswer)).toBe(true);
+    expect(hasCompleteResponse(selected.questionVOList[0], selected.questionAnswerItemVOList![0].userAnswer)).toBe(true);
+    const partial = legacyData({ exercise: roleExercise, submitNum: 1, doRecord: { type: 9, roleId: 'role-1', answer: {
+      'sent-1': { recordAudio: 'audio-1' },
+    } } });
+    expect(hasCompleteResponse(partial.questionVOList[0], partial.questionAnswerItemVOList![0].userAnswer)).toBe(false);
+    const bothRoles = legacyData({ exercise: roleExercise, submitNum: 1, doRecord: { type: 9, answer: {
+      'sent-1': { recordAudio: 'audio-1' }, 'sent-2': { recordAudio: 'audio-2' }, 'sent-3': { recordAudio: 'audio-3' },
+    } } });
+    expect(hasCompleteResponse(bothRoles.questionVOList[0], bothRoles.questionAnswerItemVOList![0].userAnswer)).toBe(true);
   });
   it('finds role-play capability on the actual adap/listen component tags', () => {
     document.body.innerHTML = '<app-course-task-stu><lib-adap-exercise-cs-study></lib-adap-exercise-cs-study></app-course-task-stu>';
@@ -75,6 +90,41 @@ describe('legacy production route regression', () => {
     const unit = adapter.discover()[0];
     const task = planTasks(legacyData({ exercise: roleExercise, submitNum: 0 }))[0];
     expect((adapter as any).leaf(unit, task).component).toBe(c);
+  });
+  it('submits the selected role samples as recording results without microphone or playVadio', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-adap-exercise-cs-study></lib-adap-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const roleExercise: any = { id: 'role-q', type: 9,
+      roles: [{ id: 'role-a', name: 'A' }, { id: 'role-b', name: 'B' }],
+      sentItems: [
+        { id: 'a-1', roleId: 'role-a', audio: 'res-a1', audioTime: '3' },
+        { id: 'b-1', roleId: 'role-b', audio: 'res-b1', audioTime: '3' },
+        { id: 'a-2', roleId: 'role-a', audio: 'res-a2', audioTime: '4' },
+      ] };
+    const changes = vi.fn();
+    const getResUrl = vi.fn((id: string) => ({ subscribe: ({ next }: any) => {
+      next({ url: `https://cdn.example/${id}.mp3` }); return { unsubscribe: vi.fn() };
+    } }));
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: roleExercise, pageTitle: 'Role Sample',
+      doRecord: { type: 9, roleId: 'role-a', answer: {} }, loadDoRecord() {},
+      doRecordChange: { emit: changes }, getWebUrlService: { getResUrl },
+      dataChange() { changes(this.doRecord); }, selectRole: vi.fn(), start: vi.fn(), playVadio: vi.fn() };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
+    const unit = adapter.discover()[0];
+    const data = legacyData({ exercise: roleExercise, submitNum: 0, doRecord: c.doRecord });
+    const task = planTasks(data)[0];
+    const value = await adapter.record(unit, task, defaults, signal());
+    expect(c.selectRole).toHaveBeenCalledWith('role-a');
+    expect(c.start).not.toHaveBeenCalled(); expect(c.playVadio).not.toHaveBeenCalled();
+    expect(c.doRecord.answer['b-1']).toBeUndefined();
+    expect(c.doRecord.answer['a-1'].recordAudio).toBe('https://cdn.example/res-a1.mp3');
+    expect(c.doRecord.answer['a-2'].recordAudio).toBe('https://cdn.example/res-a2.mp3');
+    expect(value).toEqual([{ idx: 'a-1', audio: 'https://cdn.example/res-a1.mp3' },
+      { idx: 'a-2', audio: 'https://cdn.example/res-a2.mp3' }]);
+    expect(changes).toHaveBeenCalled();
+    expect(getResUrl.mock.calls.map(call => call[0])).toEqual(['res-a1', 'res-a2']);
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());

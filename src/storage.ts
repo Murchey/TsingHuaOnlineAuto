@@ -20,6 +20,8 @@ export class Store {
         allLoaded: raw.allLoaded === true,
         recordingSeconds: typeof raw.recordingSeconds === 'number' && Number.isFinite(raw.recordingSeconds) ?
           Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
+        rolePlayExampleAudio: typeof raw.rolePlayExampleAudio === 'boolean' ?
+          raw.rolePlayExampleAudio : defaults.rolePlayExampleAudio,
         timeoutMs: defaults.timeoutMs, intervalMs: defaults.intervalMs,
       };
     } catch { return { ...defaults }; }

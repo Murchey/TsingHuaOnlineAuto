@@ -14,7 +14,9 @@
 
 旧版题目、选项及空位通常使用 UUID，不是纯数字。解析及本地恢复校验均支持这些标识。单／多选按 ID 调用原站 `answerChange`；普通填空和问答使用输入事件；24 型拖拽填空按 `fillBlanks[].id/answer` 与 `dragged[].id` 匹配，再调用原有删除和拖放事件处理器。在 Angular Zone 中执行组件回调。匹配不唯一时暂停。
 
-提交只点击当前块唯一可见的 Submit 按钮。站点自行处理提交、签名和结果；脚本通过前述正常读取再次核对 `submitNum` 与逐题作答内容，失败不自动重发。20 型普通录音使用网站真实 MP3Recorder 和上传流程；角色扮演及其他旧版评测题尚不支持。
+提交只点击当前块唯一可见的 Submit 按钮。站点自行处理提交、签名和结果；脚本通过前述正常读取再次核对 `submitNum` 与逐题作答内容，失败不自动重发。20 型普通录音使用网站真实 MP3Recorder 和上传流程。
+
+角色扮演 9 型的 `sentItems[]` 同时包含用户角色和对话角色，只有用户角色句子会产生 `doRecord.answer[id].recordAudio`。原站 `changeAudioUrl()` 会播放对话角色示例，并对用户角色句子自动调用 Chivox；逐句调用 `playVadio()` 会与录音状态机竞争。0.1.4 起只处理所选角色，并默认调用原站 `getWebUrlService.getResUrl(sentItem.audio, 2)` 解析示例音频 URL，写入标准 answer 结构的 `recordAudio` 后触发 `dataChange()`，不申请麦克风或调用 Chivox。该模式不生成评分；关闭面板选项后仍按原站自动流程等待真实麦克风结果。其他旧版评测变体继续暂停。示例音频地址是否被 Submit 接口接受尚未在真实账号验收。
 
 ## 新版 Vue
 

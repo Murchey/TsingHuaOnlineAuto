@@ -40,12 +40,13 @@ export interface Task {
 export interface Settings {
   allLoaded: boolean;
   recordingSeconds: number;
+  rolePlayExampleAudio: boolean;
   timeoutMs: number;
   intervalMs: number;
 }
 
 export const defaults: Settings = {
-  allLoaded: false, recordingSeconds: 10, timeoutMs: 30_000, intervalMs: 350,
+  allLoaded: false, recordingSeconds: 10, rolePlayExampleAudio: true, timeoutMs: 30_000, intervalMs: 350,
 };
 
 export class Halt extends Error {

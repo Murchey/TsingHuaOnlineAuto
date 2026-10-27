@@ -7,6 +7,9 @@ it('restores defaults for damaged settings and clamps duration', () => {
   localStorage.setItem('thoa:v1:settings', '{bad'); expect(new Store().settings()).toEqual(defaults);
   localStorage.setItem('thoa:v1:settings', '{"recordingSeconds":999,"allLoaded":true}');
   expect(new Store().settings().recordingSeconds).toBe(180); expect(new Store().settings().allLoaded).toBe(true);
+  expect(new Store().settings().rolePlayExampleAudio).toBe(true);
+  localStorage.setItem('thoa:v1:settings', '{"rolePlayExampleAudio":false}');
+  expect(new Store().settings().rolePlayExampleAudio).toBe(false);
 });
 it('blocks damaged checkpoint recovery instead of treating it as a fresh exercise', () => {
   localStorage.setItem('thoa:v1:unit', '{"version":1,"phase":"pending"}');

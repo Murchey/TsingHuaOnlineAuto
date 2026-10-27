@@ -20,6 +20,8 @@
 
 角色选择变体只处理所选角色句子；跟读变体处理全部句子。原题缺少音频时暂停，不伪造分数。面板另保留“原题音频直填（不评分）”和“真实麦克风”排障模式。MiMo TTS/AI 接口已在 `src/mimo.ts` 预留，但未接入本流程。其他旧版评测变体继续暂停。
 
+`legacy_18` 是角色扮演题型：`LIB-ROLE-PLAY-EXERCISE-CS-STUDY` 提供 `selectRole/start/dataChange`，`doRecord` 含 `roleId` 和 `saSentScore`。0.2.1 选择角色后只处理该角色的 `sentItems`，逐句调用 MiMo TTS（`mimo-v2.5-tts`，可配置模型/音色/Base/Key），把返回的 MP3 解码后交给同一个 `scoreWithChivox` 录音注入器，取得真实评分和 Chivox `recordAudio`，写回 `doRecord.answer`，最后关闭角色选择遮罩并触发 `dataChange()`。MiMo Key 只保存在当前标签页会话；缺少 Key 时暂停，不退回麦克风。
+
 ## 新版 Vue
 
 公开首页及其第一方资源：`/assets/textbook-reader-BwTC3IPT.js`、`/assets/src-CRr8PyXj.js`、`/assets/router-l05bPN5G.js`、`/assets/runtime-core.esm-bundler-DDWTrPxX.js`。文件名可能变化。

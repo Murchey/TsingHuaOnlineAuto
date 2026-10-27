@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.2.0
-// @description  日常练习填写、原题音频 Chivox 评测、真实麦克风录音、MiMo API 接口预留、提交核对及故障诊断
+// @version      0.2.1
+// @description  日常练习填写、原题音频 Chivox 评测、legacy_18 MiMo TTS、真实麦克风录音、提交核对及故障诊断
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
 // @run-at       document-start
@@ -20,6 +20,10 @@
     allLoaded: false,
     recordingSeconds: 10,
     rolePlayAudioMode: "original",
+    mimoApiKey: "",
+    mimoApiBase: "https://api.xiaomimimo.com/v1",
+    mimoTtsModel: "mimo-v2.5-tts",
+    mimoTtsVoice: "mimo_default",
     timeoutMs: 3e4,
     intervalMs: 350
   };
@@ -119,7 +123,7 @@
     const raw = q.answer !== "" && q.answer != null ? q.answer : record?.answer;
     const answer = parse(raw);
     const extension = parse(q.extension);
-    if (["oral_simple_speak", "oral_follow_along", "oral_vocabulary_learning", "legacy_9"].includes(q.type)) {
+    if (["oral_simple_speak", "oral_follow_along", "oral_vocabulary_learning", "legacy_9", "legacy_18"].includes(q.type)) {
       return { question: q, kind: "recording" };
     }
     if (["choice_single", "choice_multiple", "judge_basic"].includes(q.type)) {
@@ -199,6 +203,10 @@
     if (q.type.startsWith("essay_")) return { answer: String(object(v).answer ?? "").replace(/\r\n/g, "\n").trim() };
     if (q.type === "oral_simple_speak") return { audio: audioId(object(v).audio) };
     if (q.type === "legacy_9") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, audio: audioId(String(a.audio || "")) })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
+    if (q.type === "legacy_18") {
+      const r = object(v);
+      return { roleId: String(r.roleId || ""), answers: Array.isArray(r.answers) ? r.answers.map(object).map((a) => ({ idx: a.idx, audio: audioId(String(a.audio || "")) })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : [] };
+    }
     if (q.type === "oral_follow_along" || q.type === "oral_vocabulary_learning") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, audio: audioId(object(a.answer).audio) })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     return v;
   }
@@ -224,6 +232,19 @@
       const roleIds = new Set([...answeredIds].map((idx) => String(itemById.get(idx)?.roleId ?? "")));
       if (roleIds.size !== 1) return false;
       const roleId = [...roleIds][0];
+      const expected = items.filter((item) => String(object(item).roleId ?? "") === roleId);
+      return expected.length > 0 && expected.every((item) => answeredIds.has(String(object(item).idx)));
+    }
+    if (q.type === "legacy_18") {
+      const items = object(q.extension).sentItems;
+      const record = object(v), answers = Array.isArray(record.answers) ? record.answers.map(object) : [];
+      const roleId = String(record.roleId || "");
+      if (!roleId || !Array.isArray(items) || !items.length || !answers.length) return false;
+      if (answers.some((a) => typeof a.audio !== "string" || !a.audio)) return false;
+      const itemById = new Map(items.map((item) => [String(object(item).idx), object(item)]));
+      if (itemById.size !== items.length) return false;
+      const answeredIds = new Set(answers.map((a) => String(a.idx)));
+      if (answeredIds.size !== answers.length || [...answeredIds].some((idx) => !itemById.has(idx))) return false;
       const expected = items.filter((item) => String(object(item).roleId ?? "") === roleId);
       return expected.length > 0 && expected.every((item) => answeredIds.has(String(object(item).idx)));
     }
@@ -665,6 +686,109 @@
     }
   }
 
+  // src/mimo.ts
+  function endpoint(base) {
+    const value = (base || "https://api.xiaomimimo.com/v1").trim().replace(/\/+$/, "");
+    return /\/chat\/completions$/i.test(value) ? value : value + "/chat/completions";
+  }
+  function headers(key2) {
+    return { "Content-Type": "application/json", "api-key": key2, Authorization: `Bearer ${key2}` };
+  }
+  function failure(status, text2) {
+    let message = "";
+    try {
+      const parsed = JSON.parse(text2);
+      message = typeof parsed.error?.message === "string" ? parsed.error.message : typeof parsed.message === "string" ? parsed.message : "";
+    } catch {
+    }
+    return new Halt("API_ERROR", `MiMo API 请求失败（HTTP ${status}）${message ? `：${message.slice(0, 180)}` : ""}`);
+  }
+  async function post(body, config, signal) {
+    if (!config.apiKey.trim()) throw new Halt("API_CONFIG", "请先在面板中填写 MiMo API Key");
+    const url = endpoint(config.apiBase), data = JSON.stringify(body);
+    const timeout = Math.min(12e4, Math.max(15e3, config.timeoutMs ?? 3e4));
+    const gm = globalThis.GM_xmlhttpRequest;
+    if (typeof gm === "function") {
+      return new Promise((resolve, reject) => {
+        if (signal.aborted) {
+          reject(new Halt("CANCELLED", "操作已暂停或停止"));
+          return;
+        }
+        let settled = false;
+        const cleanup = () => {
+          signal.removeEventListener("abort", abort);
+        };
+        const done = (fn) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          fn();
+        };
+        const abort = () => {
+          try {
+            request?.abort?.();
+          } catch {
+          }
+          done(() => reject(new Halt("CANCELLED", "操作已暂停或停止")));
+        };
+        const request = gm({
+          method: "POST",
+          url,
+          headers: headers(config.apiKey),
+          data,
+          timeout,
+          onload: (response) => done(() => response.status >= 200 && response.status < 300 ? resolve(response.responseText) : reject(failure(response.status, response.responseText))),
+          onerror: () => done(() => reject(new Halt("API_NETWORK", "MiMo API 网络请求失败，请检查网络或脚本管理器授权"))),
+          ontimeout: () => done(() => reject(new Halt("API_TIMEOUT", "MiMo API 请求超时")))
+        });
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+    try {
+      const response = await bounded(fetch(url, { method: "POST", headers: headers(config.apiKey), body: data, signal }), timeout, signal);
+      const text2 = await response.text();
+      if (!response.ok) throw failure(response.status, text2);
+      return text2;
+    } catch (error) {
+      if (error instanceof Halt) throw error;
+      throw new Halt("API_CORS", "浏览器直接访问 MiMo API 失败；请使用支持 GM_xmlhttpRequest 的脚本管理器，或在设置中检查 API Base");
+    }
+  }
+  function decodeAudio(value) {
+    const clean = value.replace(/^data:[^,]*,/i, "").replace(/\s+/g, "");
+    if (!clean) throw new Halt("TTS_RESPONSE", "MiMo TTS 返回了空音频");
+    let binary;
+    try {
+      binary = atob(clean);
+    } catch {
+      throw new Halt("TTS_RESPONSE", "MiMo TTS 返回的音频不是有效 Base64");
+    }
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return bytes.buffer;
+  }
+  async function mimoTts(text2, config, signal) {
+    const value = text2.trim();
+    if (!value) throw new Halt("TTS_TEXT", "当前句子没有可合成的文本");
+    const body = {
+      model: (config.ttsModel || "mimo-v2.5-tts").trim(),
+      messages: [{ role: "assistant", content: value }],
+      audio: { format: "mp3", voice: (config.ttsVoice || "mimo_default").trim() },
+      stream: false
+    };
+    let parsed;
+    try {
+      parsed = JSON.parse(await post(body, config, signal));
+    } catch (error) {
+      if (error instanceof Halt) throw error;
+      throw new Halt("TTS_RESPONSE", "MiMo TTS 返回内容不是有效 JSON");
+    }
+    const audio = parsed?.choices?.[0]?.message?.audio;
+    const data = typeof audio?.data === "string" ? audio.data : typeof audio?.audio === "string" ? audio.audio : "";
+    if (!data) throw new Halt("TTS_RESPONSE", "MiMo TTS 响应中缺少 message.audio.data");
+    return decodeAudio(data);
+  }
+
   // src/legacy-angular.ts
   var runtime;
   var application;
@@ -737,8 +861,8 @@
     } else if ([6, 7, 8].includes(type)) {
       q.type = "essay_questions_answers";
       q.answer = text(e.answer);
-    } else if (type === 9) {
-      q.type = "legacy_9";
+    } else if (type === 9 || type === 18) {
+      q.type = type === 9 ? "legacy_9" : "legacy_18";
       const roles = arrayField(e, "roles", "roleList");
       const sentItems = arrayField(e, "sentItems", "sentenceItems", "items");
       q.extension = {
@@ -804,6 +928,10 @@
     if (q.type === "legacy_9") {
       const answers = object(a);
       return Object.entries(answers).map(([idx, value]) => ({ idx, audio: object(value).recordAudio || "" }));
+    }
+    if (q.type === "legacy_18") {
+      const answers = object(a);
+      return { roleId: String(object(record).roleId || ""), answers: Object.entries(answers).map(([idx, value]) => ({ idx, audio: object(value).recordAudio || "" })) };
     }
     return a;
   }
@@ -907,15 +1035,15 @@
     }
     leaf(unit, task) {
       this.editable(unit);
-      const rolePlay = task.question.type === "legacy_9";
-      const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) && root.isConnected && typeof c.doRecordChange?.emit === "function" && shown(root) && (String(c.exercise?.id) === String(task.question.id) || rolePlay && (Number(c.exercise?.type) === 9 || typeof c.selectRole === "function" || typeof c.start === "function" || typeof c.playVadio === "function")));
+      const rolePlay = task.question.type === "legacy_9" || task.question.type === "legacy_18";
+      const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) && root.isConnected && typeof c.doRecordChange?.emit === "function" && shown(root) && (String(c.exercise?.id) === String(task.question.id) || rolePlay && ([9, 18].includes(Number(c.exercise?.type)) || typeof c.selectRole === "function" || typeof c.start === "function" || typeof c.playVadio === "function")));
       const usable = matches.filter(({ component: c }) => ![14, 15, 16, 25].includes(Number(c.exercise?.type)));
       if (!usable.length) throw new Halt("QUESTION_DOM", "旧版作答组件未就绪，请等待题目加载");
       const ranked = usable.map((entry) => {
         const c = entry.component;
         let score = 0;
         if (rolePlay) {
-          if (Number(c.exercise?.type) === 9) score += 5;
+          if ([9, 18].includes(Number(c.exercise?.type))) score += 5;
           if (typeof c.selectRole === "function") score += 4;
           if (typeof c.start === "function") score += 4;
           if (typeof c.playVadio === "function") score += 4;
@@ -989,8 +1117,9 @@
     }
     async record(unit, task, settings, signal) {
       const { component: c, root } = this.leaf(unit, task);
-      if (![9, 20].includes(Number(c.exercise.type))) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
+      if (![9, 18, 20].includes(Number(c.exercise.type))) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
       if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
+      if (Number(c.exercise.type) === 18) return this.recordRolePlayTts(unit, task, settings, signal, c);
       if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
       let cancelled = false;
       try {
@@ -1155,6 +1284,74 @@
           }
         }
       }
+      return legacyValue(task.question, c.doRecord);
+    }
+    async recordRolePlayTts(unit, task, settings, signal, c) {
+      const taskExt = object(task.question.extension);
+      const nativeExt = object(legacyRoleExtension(c.exercise));
+      const nativeItems = Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : [];
+      const taskItems = Array.isArray(taskExt.sentItems) ? taskExt.sentItems : [];
+      const items = (nativeItems.length ? nativeItems : taskItems).map((value) => {
+        const item = object(value);
+        return { ...item, id: item.id ?? item.idx };
+      });
+      const roles = (Array.isArray(nativeExt.roles) && nativeExt.roles.length ? nativeExt.roles : Array.isArray(taskExt.roles) ? taskExt.roles : []).map(object);
+      if (!items.length || !roles.length || typeof c.selectRole !== "function") {
+        throw new Halt("RECORDING_DOM", "legacy_18 缺少角色、句子或角色选择控件");
+      }
+      const roleId = c.doRecord?.roleId || roles.find((role) => items.some((item) => String(item.roleId) === String(role.id)))?.id || roles[0].id;
+      if (!roleId) throw new Halt("RECORDING_DOM", "legacy_18 没有可选角色");
+      const target = items.filter((item) => String(item.roleId) === String(roleId));
+      if (!target.length || target.some((item) => !item.id) || new Set(target.map((item) => String(item.id))).size !== target.length) {
+        throw new Halt("RECORDING_DOM", "legacy_18 所选角色句子标识缺失、重复或无法匹配");
+      }
+      this.run(unit, () => c.selectRole(roleId));
+      const answers = () => object(object(c.doRecord).answer);
+      const done = (item) => {
+        const answer = object(answers()[String(item.id)]);
+        return typeof answer.recordAudio === "string" && !!answer.recordAudio;
+      };
+      if (target.every(done)) return legacyValue(task.question, c.doRecord);
+      if (!settings.mimoApiKey.trim()) {
+        throw new Halt("TTS_CONFIG", "legacy_18 需要 MiMo TTS：请先在面板的“MiMo TTS 配置”中填写 API Key");
+      }
+      const speech = this.speechAssessment();
+      const config = {
+        apiKey: settings.mimoApiKey,
+        apiBase: settings.mimoApiBase,
+        ttsModel: settings.mimoTtsModel,
+        ttsVoice: settings.mimoTtsVoice,
+        timeoutMs: settings.timeoutMs
+      };
+      for (const item of target) {
+        check(signal);
+        if (done(item)) continue;
+        const text2 = richText(item.styleText ?? item.text ?? item.content);
+        if (!text2) throw new Halt("TTS_TEXT", `句子 ${String(item.id)} 没有可合成文本`);
+        const audio = await mimoTts(text2, config, signal);
+        const result = await scoreWithChivox(speech, text2, audio, settings.timeoutMs, signal);
+        check(signal);
+        this.editable(unit);
+        this.run(unit, () => {
+          const record = object(c.doRecord);
+          if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+          const current = record.answer;
+          const id2 = String(item.id);
+          current[id2] = { ...roleAnswer(), ...object(current[id2]), ...result };
+          if (typeof c.dataChange === "function") c.dataChange();
+          else c.doRecordChange.emit(record);
+        });
+        await sleep(80, signal);
+      }
+      this.run(unit, () => {
+        if (typeof c.selectNowRole === "function") c.selectNowRole();
+        c.showSelectRole = false;
+        c.showTime = false;
+        c.isClose = true;
+        if (typeof c.dataChange === "function") c.dataChange();
+        else c.doRecordChange.emit(c.doRecord);
+      });
+      if (!target.every(done)) throw new Halt("TTS_SCORE", "TTS 已处理，但网页未接收角色扮演作答，请导出诊断");
       return legacyValue(task.question, c.doRecord);
     }
     speechAssessment() {
@@ -1543,7 +1740,7 @@
   var styles = `
 :host{all:initial!important;position:fixed!important;right:18px!important;bottom:18px!important;z-index:2147483647!important;display:block!important;color-scheme:light!important;font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif!important;color:#263044!important}
 *{box-sizing:border-box}button,input,select{font:inherit}button{cursor:pointer;border:1px solid #d6dce7;border-radius:7px;background:#fff;color:#263044;padding:5px 11px}button:hover{background:#edf1fa}button:disabled{opacity:.45;cursor:default}.primary{background:#6c37a5;color:white;border-color:#6c37a5}.primary:hover{background:#572a89}
-.panel{width:min(365px,calc(100vw - 36px));max-height:85vh;overflow:auto;background:white;border:1px solid #dbe0e9;border-radius:14px;box-shadow:0 8px 38px #1c183d33}.header{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:#f6f1fb;border-radius:14px 14px 0 0}.header strong{font-size:15px}.header button{padding:0 8px;font-size:19px}.body{padding:14px 16px}.hint{font-size:12px;color:#697285;margin:8px 0}.status{font-weight:650;color:#67369b}.message{overflow-wrap:anywhere;white-space:pre-wrap;font-size:13px;min-height:42px}.progress{margin:8px 0;width:100%;accent-color:#6c37a5}.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:9px 0}select{width:100%;border:1px solid #d6dce7;border-radius:7px;padding:7px;background:white;color:inherit}input[type=number]{width:65px;border:1px solid #d6dce7;border-radius:5px;padding:3px}label{font-size:13px}input[type=checkbox]{accent-color:#6c37a5}details{border-top:1px solid #edf0f4;margin-top:10px;padding-top:8px}summary{cursor:pointer;font-size:12px;color:#697285}.logs{max-height:150px;overflow:auto;margin:7px 0;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.error{color:#aa3040}.mini{border-radius:25px;background:#6c37a5;color:white;padding:10px 16px;box-shadow:0 4px 20px #33174933}.hidden{display:none!important}.actions button{flex:1}.pending{font-size:12px;color:#aa3040;max-height:70px;overflow:auto}.toolbar button{font-size:12px;padding:4px 8px}
+.panel{width:min(365px,calc(100vw - 36px));max-height:85vh;overflow:auto;background:white;border:1px solid #dbe0e9;border-radius:14px;box-shadow:0 8px 38px #1c183d33}.header{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:#f6f1fb;border-radius:14px 14px 0 0}.header strong{font-size:15px}.header button{padding:0 8px;font-size:19px}.body{padding:14px 16px}.hint{font-size:12px;color:#697285;margin:8px 0}.status{font-weight:650;color:#67369b}.message{overflow-wrap:anywhere;white-space:pre-wrap;font-size:13px;min-height:42px}.progress{margin:8px 0;width:100%;accent-color:#6c37a5}.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:9px 0}select{width:100%;border:1px solid #d6dce7;border-radius:7px;padding:7px;background:white;color:inherit}input[type=number]{width:65px;border:1px solid #d6dce7;border-radius:5px;padding:3px}label{font-size:13px}input[type=checkbox]{accent-color:#6c37a5}details{border-top:1px solid #edf0f4;margin-top:10px;padding-top:8px}summary{cursor:pointer;font-size:12px;color:#697285}.logs{max-height:150px;overflow:auto;margin:7px 0;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.error{color:#aa3040}.mini{border-radius:25px;background:#6c37a5;color:white;padding:10px 16px;box-shadow:0 4px 20px #33174933}.hidden{display:none!important}.actions button{flex:1}.pending{font-size:12px;color:#aa3040;max-height:70px;overflow:auto}.toolbar button{font-size:12px;padding:4px 8px}input[type=text],input[type=password]{width:100%;border:1px solid #d6dce7;border-radius:5px;padding:5px;margin:3px 0}details label{display:block;margin:6px 0}
 `;
   var Panel = class {
     constructor(controller, adapter, store) {
@@ -1570,7 +1767,14 @@
             <option value="sample">原题音频直填（不评分）</option>
             <option value="microphone">真实麦克风</option>
           </select></label></div>
-          <p class="hint">有原题音频时默认灌入原站 Chivox，生成真实评分；缺少音频会暂停。MiMo TTS 接口已预留，尚未接入录音流程。跟读和单词题遵循页面时长。</p>
+          <p class="hint">type 9 有原题音频时默认灌入原站 Chivox 生成评分；type 18 角色扮演使用 MiMo TTS 合成台词后再评测。跟读和单词题遵循页面时长。</p>
+          <details><summary>MiMo TTS 配置（legacy_18）</summary>
+            <label>API Key <input id="mimoApiKey" type="password" autocomplete="off"></label>
+            <label>API Base <input id="mimoApiBase" type="text"></label>
+            <label>TTS 模型 <input id="mimoTtsModel" type="text"></label>
+            <label>TTS 音色 <input id="mimoTtsVoice" type="text"></label>
+            <p class="hint">API Key 只保存在当前标签页会话。legacy_18 缺少配置时会暂停，不会退回麦克风。</p>
+          </details>
           <progress id="progress" class="progress" value="0" max="1"></progress><div class="hint" id="counts"></div>
           <div class="actions row"><button class="primary" id="start">开始</button><button id="pause">暂停</button><button id="stop">停止</button></div>
           <div id="pending" class="pending"></div>
@@ -1580,10 +1784,14 @@
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.2.0";
+      this.el("version").textContent = false ? "dev" : "0.2.1";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
+      this.input("mimoApiKey").value = this.settings.mimoApiKey;
+      this.input("mimoApiBase").value = this.settings.mimoApiBase;
+      this.input("mimoTtsModel").value = this.settings.mimoTtsModel;
+      this.input("mimoTtsVoice").value = this.settings.mimoTtsVoice;
       this.el("collapse").addEventListener("click", () => {
         this.el("panel").classList.add("hidden");
         this.el("mini").classList.remove("hidden");
@@ -1604,7 +1812,11 @@
             ...defaults,
             allLoaded: this.input("all").checked,
             recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds,
-            rolePlayAudioMode: ["original", "sample", "microphone"].includes(mode) ? mode : defaults.rolePlayAudioMode
+            rolePlayAudioMode: ["original", "sample", "microphone"].includes(mode) ? mode : defaults.rolePlayAudioMode,
+            mimoApiKey: this.input("mimoApiKey").value.trim(),
+            mimoApiBase: this.input("mimoApiBase").value.trim() || defaults.mimoApiBase,
+            mimoTtsModel: this.input("mimoTtsModel").value.trim() || defaults.mimoTtsModel,
+            mimoTtsVoice: this.input("mimoTtsVoice").value.trim() || defaults.mimoTtsVoice
           };
           this.input("seconds").value = String(this.settings.recordingSeconds);
           this.store.saveSettings(this.settings);
@@ -1723,7 +1935,7 @@
       const progress = this.el("progress");
       progress.max = Math.max(p.total, 1);
       progress.value = p.completed;
-      for (const id2 of ["units", "seconds", "all", "rolePlayMode", "refresh", "reset"]) this.el(id2).disabled = busy;
+      for (const id2 of ["units", "seconds", "all", "rolePlayMode", "mimoApiKey", "mimoApiBase", "mimoTtsModel", "mimoTtsVoice", "refresh", "reset"]) this.el(id2).disabled = busy;
       this.el("start").disabled = busy || !this.units.length;
       this.el("start").textContent = p.status === "paused" || p.status === "stopped" ? "继续" : "开始";
       this.el("pause").disabled = !busy;
@@ -1746,7 +1958,7 @@
       } catch {
       }
       return {
-        version: false ? "dev" : "0.2.0",
+        version: false ? "dev" : "0.2.1",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),
@@ -1782,9 +1994,13 @@
 
   // src/storage.ts
   var prefix = "thoa:v1:";
+  function settingString(value, fallback, max) {
+    return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : fallback;
+  }
   var Store = class {
-    constructor(storage = localStorage) {
+    constructor(storage = localStorage, session = typeof sessionStorage === "undefined" ? localStorage : sessionStorage) {
       this.storage = storage;
+      this.session = session;
     }
     settings() {
       try {
@@ -1794,15 +2010,32 @@
           allLoaded: raw.allLoaded === true,
           recordingSeconds: typeof raw.recordingSeconds === "number" && Number.isFinite(raw.recordingSeconds) ? Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
           rolePlayAudioMode: mode,
+          mimoApiKey: this.readSession(prefix + "mimoApiKey"),
+          mimoApiBase: settingString(raw.mimoApiBase, defaults.mimoApiBase, 300),
+          mimoTtsModel: settingString(raw.mimoTtsModel, defaults.mimoTtsModel, 120),
+          mimoTtsVoice: settingString(raw.mimoTtsVoice, defaults.mimoTtsVoice, 120),
           timeoutMs: defaults.timeoutMs,
           intervalMs: defaults.intervalMs
         };
       } catch {
-        return { ...defaults };
+        return { ...defaults, mimoApiKey: this.readSession(prefix + "mimoApiKey") };
       }
     }
     saveSettings(settings) {
-      this.write(prefix + "settings", settings);
+      const { mimoApiKey, ...persisted } = settings;
+      this.write(prefix + "settings", persisted);
+      try {
+        this.session.setItem(prefix + "mimoApiKey", mimoApiKey);
+      } catch {
+        throw new Halt("STORAGE_WRITE", "无法保存 MiMo API Key 到当前会话，请检查浏览器存储设置");
+      }
+    }
+    readSession(key2) {
+      try {
+        return this.session.getItem(key2) || "";
+      } catch {
+        return "";
+      }
     }
     read(key2) {
       try {

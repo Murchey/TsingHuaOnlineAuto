@@ -1,6 +1,7 @@
 import { bounded, check, sleep, until } from './async';
 import { canonical, object, stable } from './answers';
 import { scoreWithChivox } from './chivox';
+import { mimoTts } from './mimo';
 import { routePath, shown, TsinghuaAdapter } from './adapter';
 import { legacyComponents, runInLegacyZone, type LegacyComponent } from './legacy-angular';
 import { legacyData, legacyValue, richText } from './legacy-data';
@@ -85,11 +86,11 @@ export class LegacyAdapter implements Adapter {
   }
   private leaf(unit: Unit, task: Task): { component: LegacyComponent; root: HTMLElement } {
     this.editable(unit);
-    const rolePlay = task.question.type === 'legacy_9';
+    const rolePlay = task.question.type === 'legacy_9' || task.question.type === 'legacy_18';
     const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) && root.isConnected &&
       typeof c.doRecordChange?.emit === 'function' && shown(root) &&
       (String(c.exercise?.id) === String(task.question.id) ||
-       (rolePlay && (Number(c.exercise?.type) === 9 ||
+       (rolePlay && ([9, 18].includes(Number(c.exercise?.type)) ||
          typeof c.selectRole === 'function' || typeof c.start === 'function' || typeof c.playVadio === 'function'))));
     const usable = matches.filter(({ component: c }) => ![14, 15, 16, 25].includes(Number(c.exercise?.type)));
     if (!usable.length) throw new Halt('QUESTION_DOM', '旧版作答组件未就绪，请等待题目加载');
@@ -97,7 +98,7 @@ export class LegacyAdapter implements Adapter {
       const c = entry.component;
       let score = 0;
       if (rolePlay) {
-        if (Number(c.exercise?.type) === 9) score += 5;
+        if ([9, 18].includes(Number(c.exercise?.type))) score += 5;
         if (typeof c.selectRole === 'function') score += 4;
         if (typeof c.start === 'function') score += 4;
         if (typeof c.playVadio === 'function') score += 4;
@@ -165,8 +166,9 @@ export class LegacyAdapter implements Adapter {
   }
   async record(unit: Unit, task: Task, settings: Settings, signal: AbortSignal): Promise<unknown> {
     const { component: c, root } = this.leaf(unit, task);
-    if (![9, 20].includes(Number(c.exercise.type))) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
+    if (![9, 18, 20].includes(Number(c.exercise.type))) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
     if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
+    if (Number(c.exercise.type) === 18) return this.recordRolePlayTts(unit, task, settings, signal, c);
     if (!navigator.mediaDevices?.getUserMedia) throw new Halt('MICROPHONE', '浏览器未提供麦克风');
     let cancelled = false;
     try {
@@ -327,6 +329,72 @@ export class LegacyAdapter implements Adapter {
         }
       }
     }
+    return legacyValue(task.question, c.doRecord);
+  }
+  private async recordRolePlayTts(unit: Unit, task: Task, settings: Settings, signal: AbortSignal,
+    c: LegacyComponent): Promise<unknown> {
+    const taskExt = object(task.question.extension);
+    const nativeExt = object(legacyRoleExtension(c.exercise));
+    const nativeItems = Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : [];
+    const taskItems = Array.isArray(taskExt.sentItems) ? taskExt.sentItems : [];
+    const items = (nativeItems.length ? nativeItems : taskItems).map((value): Record<string, unknown> => {
+      const item = object(value);
+      return { ...item, id: item.id ?? item.idx };
+    });
+    const roles = (Array.isArray(nativeExt.roles) && nativeExt.roles.length ? nativeExt.roles :
+      (Array.isArray(taskExt.roles) ? taskExt.roles : [])).map(object);
+    if (!items.length || !roles.length || typeof c.selectRole !== 'function') {
+      throw new Halt('RECORDING_DOM', 'legacy_18 缺少角色、句子或角色选择控件');
+    }
+    const roleId = c.doRecord?.roleId ||
+      roles.find(role => items.some(item => String(item.roleId) === String(role.id)))?.id || roles[0].id;
+    if (!roleId) throw new Halt('RECORDING_DOM', 'legacy_18 没有可选角色');
+    const target = items.filter(item => String(item.roleId) === String(roleId));
+    if (!target.length || target.some(item => !item.id) ||
+        new Set(target.map(item => String(item.id))).size !== target.length) {
+      throw new Halt('RECORDING_DOM', 'legacy_18 所选角色句子标识缺失、重复或无法匹配');
+    }
+    this.run(unit, () => c.selectRole(roleId));
+    const answers = () => object(object(c.doRecord).answer);
+    const done = (item: Record<string, unknown>) => {
+      const answer = object(answers()[String(item.id)]);
+      return typeof answer.recordAudio === 'string' && !!answer.recordAudio;
+    };
+    if (target.every(done)) return legacyValue(task.question, c.doRecord);
+    if (!settings.mimoApiKey.trim()) {
+      throw new Halt('TTS_CONFIG', 'legacy_18 需要 MiMo TTS：请先在面板的“MiMo TTS 配置”中填写 API Key');
+    }
+    const speech = this.speechAssessment();
+    const config = { apiKey: settings.mimoApiKey, apiBase: settings.mimoApiBase,
+      ttsModel: settings.mimoTtsModel, ttsVoice: settings.mimoTtsVoice, timeoutMs: settings.timeoutMs };
+    for (const item of target) {
+      check(signal);
+      if (done(item)) continue;
+      const text = richText(item.styleText ?? item.text ?? item.content);
+      if (!text) throw new Halt('TTS_TEXT', `句子 ${String(item.id)} 没有可合成文本`);
+      const audio = await mimoTts(text, config, signal);
+      const result = await scoreWithChivox(speech, text, audio, settings.timeoutMs, signal);
+      check(signal); this.editable(unit);
+      this.run(unit, () => {
+        const record = object(c.doRecord);
+        if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+        const current = record.answer as Record<string, unknown>;
+        const id = String(item.id);
+        current[id] = { ...roleAnswer(), ...object(current[id]), ...result };
+        if (typeof c.dataChange === 'function') c.dataChange();
+        else c.doRecordChange.emit(record);
+      });
+      await sleep(80, signal);
+    }
+    this.run(unit, () => {
+      if (typeof c.selectNowRole === 'function') c.selectNowRole();
+      c.showSelectRole = false;
+      c.showTime = false;
+      c.isClose = true;
+      if (typeof c.dataChange === 'function') c.dataChange();
+      else c.doRecordChange.emit(c.doRecord);
+    });
+    if (!target.every(done)) throw new Halt('TTS_SCORE', 'TTS 已处理，但网页未接收角色扮演作答，请导出诊断');
     return legacyValue(task.question, c.doRecord);
   }
   private speechAssessment(): LegacyComponent {

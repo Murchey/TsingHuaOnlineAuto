@@ -6,8 +6,10 @@ import { Controller } from '../src/controller';
 import { Store } from '../src/storage';
 import { defaults } from '../src/model';
 import { scoreWithChivox } from '../src/chivox';
+import { mimoTts } from '../src/mimo';
 
 vi.mock('../src/chivox', () => ({ scoreWithChivox: vi.fn() }));
+vi.mock('../src/mimo', () => ({ mimoTts: vi.fn() }));
 
 const path = '/legacy/course-study-student/10/20/30/example-key';
 const signal = () => new AbortController().signal;
@@ -79,6 +81,24 @@ describe('legacy production route regression', () => {
       'sent-1': { recordAudio: 'audio-1' }, 'sent-2': { recordAudio: 'audio-2' }, 'sent-3': { recordAudio: 'audio-3' },
     } } });
     expect(hasCompleteResponse(bothRoles.questionVOList[0], bothRoles.questionAnswerItemVOList![0].userAnswer)).toBe(true);
+  });
+  it('plans legacy_18 and requires the selected role answers', () => {
+    const exercise18 = { id: 'role-18', type: 18,
+      roles: [{ id: 'role-1', name: 'Adrian' }, { id: 'role-2', name: 'Kris' }],
+      sentItems: [
+        { id: 'r-1', roleId: 'role-1', audio: 'audio-1', styleText: { paragraphs: [{ contentItems: [{ text: 'One' }] }] } },
+        { id: 'r-2', roleId: 'role-2', audio: 'audio-2', styleText: { paragraphs: [{ contentItems: [{ text: 'Two' }] }] } },
+        { id: 'r-3', roleId: 'role-1', audio: 'audio-3', styleText: { paragraphs: [{ contentItems: [{ text: 'Three' }] }] } },
+      ] };
+    const data18 = legacyData({ exercise: exercise18, submitNum: 0 });
+    expect(planTasks(data18)[0].kind).toBe('recording'); expect(planTasks(data18)[0].question.type).toBe('legacy_18');
+    const saved18 = legacyData({ exercise: exercise18, submitNum: 1, doRecord: { type: 18, roleId: 'role-1', answer: {
+      'r-1': { recordAudio: 'a-1' }, 'r-3': { recordAudio: 'a-3' },
+    } } });
+    expect(saved18.questionAnswerItemVOList![0].userAnswer).toEqual({ roleId: 'role-1', answers: [
+      { idx: 'r-1', audio: 'a-1' }, { idx: 'r-3', audio: 'a-3' },
+    ] });
+    expect(hasCompleteResponse(saved18.questionVOList[0], saved18.questionAnswerItemVOList![0].userAnswer)).toBe(true);
   });
   it('finds role-play capability on the actual adap/listen component tags', () => {
     document.body.innerHTML = '<app-course-task-stu><lib-adap-exercise-cs-study></lib-adap-exercise-cs-study></app-course-task-stu>';
@@ -221,6 +241,64 @@ describe('legacy production route regression', () => {
     const unit = adapter.discover()[0];
     const task = planTasks(legacyData({ exercise: roleExercise, submitNum: 0, doRecord: c.doRecord }))[0];
     await expect(adapter.record(unit, task, defaults, signal())).rejects.toThrow('没有原题音频');
+  });
+  it('uses MiMo TTS and Chivox for legacy_18 selected-role answers', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-role-play-exercise-cs-study></lib-role-play-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const exercise18: any = { id: 'role-18', type: 18,
+      roles: [{ id: 'role-a', name: 'A' }, { id: 'role-b', name: 'B' }],
+      sentItems: [
+        { id: 'r-a1', roleId: 'role-a', audio: 'orig-a1', styleText: { paragraphs: [{ contentItems: [{ text: 'Role A one' }] }] } },
+        { id: 'r-b1', roleId: 'role-b', audio: 'orig-b1', styleText: { paragraphs: [{ contentItems: [{ text: 'Role B one' }] }] } },
+        { id: 'r-a2', roleId: 'role-a', audio: 'orig-a2', styleText: { paragraphs: [{ contentItems: [{ text: 'Role A two' }] }] } },
+      ] };
+    const changes = vi.fn();
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise18, pageTitle: 'Role 18',
+      doRecord: { type: 18, answer: {}, roleId: '', saSentScore: 0 }, loadDoRecord() {},
+      doRecordChange: { emit: changes }, dataChange() { changes(this.doRecord); },
+      selectRole(id: string) { this.doRecord.roleId = id; }, start: vi.fn(), selectNowRole: vi.fn(),
+      showSelectRole: true, showTime: true, isClose: false };
+    const speech: any = { chivoxRecorder: { context: {} }, speechService: { startSentence: vi.fn() } };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c },
+      { root: document.createElement('div'), component: speech }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise: exercise18, submitNum: 0, doRecord: c.doRecord }))[0];
+    vi.mocked(mimoTts).mockResolvedValue(new ArrayBuffer(8));
+    vi.mocked(scoreWithChivox).mockResolvedValue({ score: 90, accuracy: 91, fluency: 89, senseGroup: 0,
+      speed: 0, stress: 0, integrity: 0, rhythm: 0, pron: 0, recordAudio: 'https://chivox.example/v18.mp3', words: [], ccode: {}, result: '' });
+    const settings = { ...defaults, mimoApiKey: 'test-key', mimoTtsModel: 'tts-model', mimoTtsVoice: 'voice' };
+    const value = await adapter.record(unit, task, settings, signal());
+    expect(mimoTts).toHaveBeenCalledTimes(2);
+    expect(mimoTts).toHaveBeenNthCalledWith(1, 'Role A one', expect.objectContaining({ apiKey: 'test-key' }), expect.anything());
+    expect(scoreWithChivox).toHaveBeenCalledTimes(2);
+    expect(c.doRecord.roleId).toBe('role-a');
+    expect(c.doRecord.answer['r-a1'].recordAudio).toBe('https://chivox.example/v18.mp3');
+    expect(c.doRecord.answer['r-a2'].recordAudio).toBe('https://chivox.example/v18.mp3');
+    expect(c.doRecord.answer['r-b1']).toBeUndefined();
+    expect(c.showSelectRole).toBe(false); expect(c.isClose).toBe(true);
+    expect(value).toEqual({ roleId: 'role-a', answers: [
+      { idx: 'r-a1', audio: 'https://chivox.example/v18.mp3' },
+      { idx: 'r-a2', audio: 'https://chivox.example/v18.mp3' },
+    ] });
+  });
+  it('requires MiMo configuration for legacy_18', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-role-play-exercise-cs-study></lib-role-play-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const exercise18: any = { id: 'role-18', type: 18, roles: [{ id: 'role-a', name: 'A' }],
+      sentItems: [{ id: 'r-a1', roleId: 'role-a', audio: 'orig-a1', styleText: { paragraphs: [{ contentItems: [{ text: 'Role A one' }] }] } }] };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise18, pageTitle: 'Role 18',
+      doRecord: { type: 18, answer: {}, roleId: '' }, loadDoRecord() {}, doRecordChange: { emit: vi.fn() },
+      dataChange: vi.fn(), selectRole(id: string) { this.doRecord.roleId = id; } };
+    const speech: any = { chivoxRecorder: { context: {} }, speechService: { startSentence: vi.fn() } };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c },
+      { root: document.createElement('div'), component: speech }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise: exercise18, submitNum: 0, doRecord: c.doRecord }))[0];
+    await expect(adapter.record(unit, task, { ...defaults, mimoApiKey: '' }, signal())).rejects.toThrow('MiMo TTS');
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());

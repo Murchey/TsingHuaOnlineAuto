@@ -26,8 +26,8 @@ export function legacyQuestion(exercise: unknown): Question {
     }
   } else if ([6, 7, 8].includes(type)) {
     q.type = 'essay_questions_answers'; q.answer = text(e.answer);
-  } else if (type === 9) {
-    q.type = 'legacy_9';
+  } else if (type === 9 || type === 18) {
+    q.type = type === 9 ? 'legacy_9' : 'legacy_18';
     const roles = arrayField(e, 'roles', 'roleList');
     const sentItems = arrayField(e, 'sentItems', 'sentenceItems', 'items');
     q.extension = {
@@ -93,6 +93,11 @@ export function legacyValue(q: Question, record: unknown): unknown {
   if (q.type === 'legacy_9') {
     const answers = object(a);
     return Object.entries(answers).map(([idx, value]) => ({ idx, audio: object(value).recordAudio || '' }));
+  }
+  if (q.type === 'legacy_18') {
+    const answers = object(a);
+    return { roleId: String(object(record).roleId || ''), answers: Object.entries(answers)
+      .map(([idx, value]) => ({ idx, audio: object(value).recordAudio || '' })) };
   }
   return a;
 }

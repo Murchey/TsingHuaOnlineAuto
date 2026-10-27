@@ -11,8 +11,13 @@ export interface Checkpoint {
   updatedAt: number;
 }
 
+function settingString(value: unknown, fallback: string, max: number): string {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : fallback;
+}
+
 export class Store {
-  constructor(private storage: Storage = localStorage) {}
+  constructor(private storage: Storage = localStorage,
+    private session: Storage = typeof sessionStorage === 'undefined' ? localStorage : sessionStorage) {}
   settings(): Settings {
     try {
       const raw = JSON.parse(this.storage.getItem(prefix + 'settings') || '{}');
@@ -23,11 +28,23 @@ export class Store {
         recordingSeconds: typeof raw.recordingSeconds === 'number' && Number.isFinite(raw.recordingSeconds) ?
           Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
         rolePlayAudioMode: mode,
+        mimoApiKey: this.readSession(prefix + 'mimoApiKey'),
+        mimoApiBase: settingString(raw.mimoApiBase, defaults.mimoApiBase, 300),
+        mimoTtsModel: settingString(raw.mimoTtsModel, defaults.mimoTtsModel, 120),
+        mimoTtsVoice: settingString(raw.mimoTtsVoice, defaults.mimoTtsVoice, 120),
         timeoutMs: defaults.timeoutMs, intervalMs: defaults.intervalMs,
       };
-    } catch { return { ...defaults }; }
+    } catch { return { ...defaults, mimoApiKey: this.readSession(prefix + 'mimoApiKey') }; }
   }
-  saveSettings(settings: Settings): void { this.write(prefix + 'settings', settings); }
+  saveSettings(settings: Settings): void {
+    const { mimoApiKey, ...persisted } = settings;
+    this.write(prefix + 'settings', persisted);
+    try { this.session.setItem(prefix + 'mimoApiKey', mimoApiKey); }
+    catch { throw new Halt('STORAGE_WRITE', '无法保存 MiMo API Key 到当前会话，请检查浏览器存储设置'); }
+  }
+  private readSession(key: string): string {
+    try { return this.session.getItem(key) || ''; } catch { return ''; }
+  }
   read(key: string): Checkpoint | undefined {
     try {
       const raw = this.storage.getItem(prefix + key);

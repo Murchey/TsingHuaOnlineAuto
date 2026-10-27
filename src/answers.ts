@@ -30,7 +30,7 @@ export function taskFor(q: Question, record?: AnswerRecord): Task {
   const raw = q.answer !== '' && q.answer != null ? q.answer : record?.answer;
   const answer = parse(raw);
   const extension = parse(q.extension);
-  if (['oral_simple_speak', 'oral_follow_along', 'oral_vocabulary_learning', 'legacy_9'].includes(q.type)) {
+  if (['oral_simple_speak', 'oral_follow_along', 'oral_vocabulary_learning', 'legacy_9', 'legacy_18'].includes(q.type)) {
     return { question: q, kind: 'recording' };
   }
   if (['choice_single', 'choice_multiple', 'judge_basic'].includes(q.type)) {
@@ -120,6 +120,12 @@ export function canonical(q: Question, value: unknown): unknown {
   if (q.type === 'oral_simple_speak') return { audio: audioId(object(v).audio) };
   if (q.type === 'legacy_9') return Array.isArray(v) ? v.map(object).map(a => ({ idx: a.idx, audio: audioId(String(a.audio || '')) }))
     .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
+  if (q.type === 'legacy_18') {
+    const r = object(v);
+    return { roleId: String(r.roleId || ''), answers: Array.isArray(r.answers) ? r.answers.map(object)
+      .map(a => ({ idx: a.idx, audio: audioId(String(a.audio || '')) }))
+      .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : [] };
+  }
   if (q.type === 'oral_follow_along' || q.type === 'oral_vocabulary_learning') return Array.isArray(v) ?
     v.map(object).map(a => ({ idx: a.idx, audio: audioId(object(a.answer).audio) }))
       .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
@@ -152,6 +158,19 @@ export function hasCompleteResponse(q: Question, value: unknown): boolean {
     const roleIds = new Set([...answeredIds].map(idx => String(itemById.get(idx)?.roleId ?? '')));
     if (roleIds.size !== 1) return false;
     const roleId = [...roleIds][0];
+    const expected = items.filter(item => String(object(item).roleId ?? '') === roleId);
+    return expected.length > 0 && expected.every(item => answeredIds.has(String(object(item).idx)));
+  }
+  if (q.type === 'legacy_18') {
+    const items = object(q.extension).sentItems;
+    const record = object(v), answers = Array.isArray(record.answers) ? record.answers.map(object) : [];
+    const roleId = String(record.roleId || '');
+    if (!roleId || !Array.isArray(items) || !items.length || !answers.length) return false;
+    if (answers.some(a => typeof a.audio !== 'string' || !a.audio)) return false;
+    const itemById = new Map(items.map(item => [String(object(item).idx), object(item)]));
+    if (itemById.size !== items.length) return false;
+    const answeredIds = new Set(answers.map(a => String(a.idx)));
+    if (answeredIds.size !== answers.length || [...answeredIds].some(idx => !itemById.has(idx))) return false;
     const expected = items.filter(item => String(object(item).roleId ?? '') === roleId);
     return expected.length > 0 && expected.every(item => answeredIds.has(String(object(item).idx)));
   }

@@ -43,12 +43,19 @@ export interface Settings {
   allLoaded: boolean;
   recordingSeconds: number;
   rolePlayAudioMode: RolePlayAudioMode;
+  mimoApiKey: string;
+  mimoApiBase: string;
+  mimoTtsModel: string;
+  mimoTtsVoice: string;
   timeoutMs: number;
   intervalMs: number;
 }
 
 export const defaults: Settings = {
-  allLoaded: false, recordingSeconds: 10, rolePlayAudioMode: 'original', timeoutMs: 30_000, intervalMs: 350,
+  allLoaded: false, recordingSeconds: 10, rolePlayAudioMode: 'original',
+  mimoApiKey: '', mimoApiBase: 'https://api.xiaomimimo.com/v1',
+  mimoTtsModel: 'mimo-v2.5-tts', mimoTtsVoice: 'mimo_default',
+  timeoutMs: 30_000, intervalMs: 350,
 };
 
 export class Halt extends Error {

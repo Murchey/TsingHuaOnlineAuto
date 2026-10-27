@@ -1,6 +1,6 @@
 # 验证记录
 
-日期：2026-10-27，版本 0.2.0。
+日期：2026-10-27，版本 0.2.1。
 
 ## 真实浏览器
 
@@ -29,13 +29,20 @@
 - 每句得到稳定 Chivox `recordAudio` URL。提交后服务器保存了 7 条作答，页面 `exerciseStatus=2`，本地记录分 `13.18`。这证明“原题音频 → Chivox → 服务器”链路可用。
 - 0.2.0 把该链路写入 `src/chivox.ts`，默认模式为 `original`；原题音频缺失时暂停，不伪造分数。`src/legacy-adapter.ts` 的自动化测试用 mock 验证了下载、评分、写回和 `dataChange()`。
 - 连续读取 `record_for_detail` 在同一秒内会间歇返回 HTTP 530；间隔 350ms 的连续请求可复现，间隔 1.5s 可成功。适配器最多重试 3 次（1.2s/2.4s），只重试 HTTP 530。
-- `src/mimo.ts` 已提供 MiMo TTS/AI 请求接口和 `GM_xmlhttpRequest` 支持，但**尚未接入录音或答题流程**；接口测试使用模拟响应，未调用真实 MiMo API。
+- `src/mimo.ts` 已提供 MiMo TTS/AI 请求接口和 `GM_xmlhttpRequest` 支持；0.2.0 时尚未接入业务流程，接口测试使用模拟响应。
 
-**尚未完成：在脚本管理器中安装 0.2.0 后，用一个新的待作答跟读题跑完整面板；真实 MiMo API 调用；以及提交后长时间刷新持久性复验。**
+## 0.2.1 legacy_18 角色扮演 TTS
+
+- 实际第 9/47 题为 `legacy_18`，组件是 `LIB-ROLE-PLAY-EXERCISE-CS-STUDY`，提供 `selectRole/start/dataChange`；`doRecord` 有 `roleId` 和 `saSentScore`，初始 `answer` 为空。
+- 0.2.1 选择角色后只处理该角色 `sentItems`，逐句调用 MiMo TTS，返回 MP3 后复用 `scoreWithChivox` 注入 Chivox，取得真实评分和 `recordAudio`，写回 `doRecord.answer`，最后关闭角色选择遮罩。
+- MiMo Key/Base/TTS 模型/音色在面板配置；Key 只存当前标签页 `sessionStorage`。缺少 Key 时暂停，不退回麦克风。
+- 自动化测试覆盖 `legacy_18` 解析、roleId、所选角色完成判定、TTS 调用、Chivox 写回和缺少 Key 暂停；**尚未用真实 MiMo API Key 在浏览器中调用**。
+
+**尚未完成：用真实 MiMo Key 在第 9/47 题或同类新题上跑完整面板、Submit、结果页和刷新持久性复验。**
 
 ## 自动验证
 
-执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 70 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
+执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 73 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
 
 覆盖：
 
@@ -44,7 +51,7 @@
 - 旧版真实格式路由、UUID 拖拽答案、正常读取 POST、页面原有提交事件、重新读取确认和 UUID 本地恢复。
 - 旧版 HTTP 530、已提交跳过、缺失答案与未支持角色扮演暂停、关闭课程和过期页面。
 - 旧版角色扮演/跟读多角色数据、仅所选角色完成判定、原题音频下载与 Chivox 写回、无音频时暂停、不调用 `playVadio()`。
-- MiMo TTS/AI 请求封装、Base64 音频解码、JSON 答案解析、缺少 Key 和 API 错误处理（使用模拟 GM 请求，不调用真实 API）。
+- MiMo TTS/AI 请求封装、Base64 音频解码、JSON 答案解析、缺少 Key 和 API 错误处理；legacy_18 的 TTS→Chivox 流程使用模拟 TTS/评分。
 - 单次提交、双击互斥、提交前持久化、失败／超时、迟到成功、刷新恢复和存储损坏。
 - 麦克风拒绝、暂停清理；设备与录音服务使用模拟，不代表真实麦克风成功。
 - 面板早期／晚期挂载、恢复与重复注入、诊断脱敏。
@@ -52,4 +59,4 @@
 
 ## 待验收
 
-安装 0.2.0 后，在新的待作答练习中用完整面板验证默认“原题音频 → Chivox”流程、Submit、结果页和刷新持久性；0.1.4 已提交过的练习不能重复提交，应另选题目。随后再验证真实麦克风模式。MiMo TTS/AI 尚未接入业务流程，真实 API 调用留待后续。其他旧版评测题继续明确暂停。
+安装 0.2.1 后，在新的待作答练习中用完整面板验证跟读 9 的“原题音频 → Chivox”流程；在 `legacy_18` 新题中填写真实 MiMo Key，验证 TTS→Chivox→Submit→结果页→刷新持久性。已提交过的练习不能重复提交，应另选题目。随后再验证真实麦克风模式。其他旧版评测题继续明确暂停。

@@ -32,6 +32,13 @@
 
 这不证明 Submit 接口接受示例音频 URL。**真实账号中的提交、服务器返回状态、结果页展示和刷新后持久性尚未验收。**
 
+## 0.1.4 补充现场验证（PID 7188 浏览器）
+
+- 实际题目组件为 `lib-listen-and-repeat-exercise-cs-study`，不是带 `selectRole/start` 的角色选择变体；它有 7 个句子答案槽和原生 `sayBy`，旧实现因此误报“缺少角色、句子或启动控件”。
+- 通过控制台把原题示例 MP3 解码为 AudioBuffer，接入原站 `Html5Recorder` 的 ScriptProcessor 输入，并静音扬声器与麦克风；7 句均得到 Chivox 真实评分，分数为 89、95、89、96、94、94、95。
+- 每句得到稳定 Chivox `recordAudio` URL。提交后服务器保存了 7 条作答，页面 `exerciseStatus=2`，本地记录分 `13.18`。这证明“外部音频 → Chivox → 服务器”链路可行；尚未接入 MiMo TTS，测试使用的是原题示例音频。
+- 连续读取 `record_for_detail` 在同一秒内会间歇返回 HTTP 530；间隔 350ms 的连续请求可复现，间隔 1.5s 可成功。适配器已改为最多 3 次、1.2s/2.4s 退避，仅重试 HTTP 530。
+
 ## 自动验证
 
 执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 63 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。

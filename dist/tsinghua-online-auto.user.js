@@ -730,6 +730,21 @@
     async load(unit, signal) {
       check(signal);
       this.assertContext(unit);
+      let last;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await sleep(attempt === 1 ? 1200 : 2400, signal);
+        try {
+          return await this.loadOnce(unit, signal);
+        } catch (error) {
+          if (!(error instanceof Halt) || error.code !== "LOAD_FAILED" || !/HTTP 530/.test(error.message)) throw error;
+          last = error;
+        }
+      }
+      throw last ?? new Halt("LOAD_FAILED", "旧版练习接口读取失败，已暂停，请检查网络后重试");
+    }
+    async loadOnce(unit, signal) {
+      check(signal);
+      this.assertContext(unit);
       const c = this.instance(unit);
       const source = c.http?.post(`/tsenglish/exercise/record_for_detail?courseId=${encodeURIComponent(c.courseId)}&pageId=${encodeURIComponent(c.pageId)}&userId=${encodeURIComponent(c.userId)}`, {});
       if (typeof source?.subscribe !== "function") throw new Halt("NO_LOADER", "无法访问旧版页面的正常练习读取方法");
@@ -889,27 +904,37 @@
     async recordRolePlay(unit, task, settings, signal, c, root) {
       const taskExt = object(task.question.extension);
       const nativeExt = object(legacyRoleExtension(c.exercise));
-      const rawItems = Array.isArray(taskExt.sentItems) && taskExt.sentItems.length ? taskExt.sentItems : Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : [];
-      const items = rawItems.map((value) => {
+      const nativeItems = Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : [];
+      const taskItems = Array.isArray(taskExt.sentItems) ? taskExt.sentItems : [];
+      const items = (nativeItems.length ? nativeItems : taskItems).map((value) => {
         const item = object(value);
         return { ...item, id: item.id ?? item.idx };
       });
-      const roles = (Array.isArray(taskExt.roles) && taskExt.roles.length ? taskExt.roles : Array.isArray(nativeExt.roles) ? nativeExt.roles : []).map(object);
+      const roles = (Array.isArray(nativeExt.roles) && nativeExt.roles.length ? nativeExt.roles : Array.isArray(taskExt.roles) ? taskExt.roles : []).map(object);
       const roleStart = root.querySelector(".lib-role-select-start button");
-      if (!items.length || !roles.length || typeof c.selectRole !== "function" || typeof c.start !== "function" && !roleStart) {
-        throw new Halt("RECORDING_DOM", "角色扮演题缺少角色、句子或启动控件");
+      const selectableRolePlay = typeof c.selectRole === "function" && (typeof c.start === "function" || !!roleStart);
+      const listenRepeat = typeof c.sayBy === "function";
+      if (!items.length || !selectableRolePlay && !listenRepeat) {
+        throw new Halt("RECORDING_DOM", "未识别角色扮演/跟读组件：缺少角色、句子或原生作答回调");
       }
-      const roleId = c.doRecord?.roleId || roles.find((role) => items.some((item) => String(item.roleId) === String(role.id)))?.id || roles[0].id;
-      if (!roleId) throw new Halt("RECORDING_DOM", "角色扮演题没有可选角色");
-      const target = items.filter((item) => String(item.roleId) === String(roleId));
-      if (!target.length || target.some((item) => !item.id) || new Set(target.map((item) => String(item.id))).size !== target.length) {
-        throw new Halt("RECORDING_DOM", "所选角色的句子标识缺失、重复或无法匹配");
+      let target = items;
+      if (selectableRolePlay) {
+        if (!roles.length) throw new Halt("RECORDING_DOM", "角色扮演题没有可选角色");
+        const roleId = c.doRecord?.roleId || roles.find((role) => items.some((item) => String(item.roleId) === String(role.id)))?.id || roles[0].id;
+        if (!roleId) throw new Halt("RECORDING_DOM", "角色扮演题没有可选角色");
+        target = items.filter((item) => String(item.roleId) === String(roleId));
+        if (!target.length) throw new Halt("RECORDING_DOM", "所选角色没有可录音句子");
+        this.run(unit, () => c.selectRole(roleId));
       }
-      const complete = () => target.every((item) => {
-        const answer = object(object(object(c.doRecord).answer)[String(item.id)]);
+      if (target.some((item) => !item.id) || new Set(target.map((item) => String(item.id))).size !== target.length) {
+        throw new Halt("RECORDING_DOM", "待录音句子的标识缺失、重复或无法匹配");
+      }
+      const answers = () => object(object(c.doRecord).answer);
+      const done = (item) => {
+        const answer = object(answers()[String(item.id)]);
         return typeof answer.recordAudio === "string" && !!answer.recordAudio;
-      });
-      this.run(unit, () => c.selectRole(roleId));
+      };
+      const complete = () => target.every(done);
       if (complete()) return legacyValue(task.question, c.doRecord);
       if (settings.rolePlayExampleAudio) {
         const urls = await Promise.all(target.map((item) => this.exampleAudioUrl(c, item, settings, signal)));
@@ -918,21 +943,21 @@
         this.run(unit, () => {
           const record = object(c.doRecord);
           if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
-          const answers = record.answer;
+          const current = record.answer;
           const targetIds = new Set(target.map((item) => String(item.id)));
-          for (const id2 of Object.keys(answers)) {
-            if (!targetIds.has(id2) && !object(answers[id2]).recordAudio) delete answers[id2];
+          for (const id2 of Object.keys(current)) {
+            if (!targetIds.has(id2) && !object(current[id2]).recordAudio) delete current[id2];
           }
           target.forEach((item, index) => {
             const id2 = String(item.id);
-            answers[id2] = { ...roleAnswer(), ...object(answers[id2]), recordAudio: urls[index] };
+            current[id2] = { ...roleAnswer(), ...object(current[id2]), recordAudio: urls[index] };
           });
           if (typeof c.dataChange === "function") c.dataChange();
           else c.doRecordChange.emit(record);
         });
         await sleep(80, signal);
         this.editable(unit);
-        if (!complete()) throw new Halt("EXAMPLE_AUDIO", "示例音频已解析，但网页未接收角色扮演作答，请导出诊断");
+        if (!complete()) throw new Halt("EXAMPLE_AUDIO", "示例音频已解析，但网页未接收跟读作答，请导出诊断");
         return legacyValue(task.question, c.doRecord);
       }
       if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
@@ -950,21 +975,35 @@
         cancelled = true;
       }
       this.editable(unit);
-      if (roleStart) roleStart.click();
-      else this.run(unit, () => c.start());
-      const budget = Math.min(6e5, items.reduce((total, item) => {
-        const seconds = Number(item.audioTime);
-        return total + Math.max(3, Math.min(45, Number.isFinite(seconds) && seconds > 0 ? seconds : 9)) * 1e3;
-      }, 0) + 3e4);
-      try {
-        await until(() => complete() ? true : void 0, budget, signal);
-      } catch (error) {
-        if (signal.aborted) throw error;
-        const missing = target.filter((item) => {
-          const answer = object(object(object(c.doRecord).answer)[String(item.id)]);
-          return typeof answer.recordAudio !== "string" || !answer.recordAudio;
-        }).map((item) => String(item.id));
-        throw new Halt("RECORD_TIMEOUT", `等待角色扮演录音超时（未完成句子：${missing.join("、")}），请检查麦克风和页面提示`);
+      if (selectableRolePlay) {
+        if (roleStart) roleStart.click();
+        else this.run(unit, () => c.start());
+        const budget = Math.min(6e5, items.reduce((total, item) => {
+          const seconds = Number(item.audioTime);
+          return total + Math.max(3, Math.min(45, Number.isFinite(seconds) && seconds > 0 ? seconds : 9)) * 1e3;
+        }, 0) + 3e4);
+        try {
+          await until(() => complete() ? true : void 0, budget, signal);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          const missing = target.filter((item) => !done(item)).map((item) => String(item.id));
+          throw new Halt("RECORD_TIMEOUT", `等待角色扮演录音超时（未完成句子：${missing.join("、")}），请检查麦克风和页面提示`);
+        }
+      } else {
+        sessionStorage.setItem("tsinghua-english-lib-audio", "0");
+        for (const item of target) {
+          check(signal);
+          if (done(item)) continue;
+          this.run(unit, () => c.sayBy(item));
+          const seconds = Number(item.audioTime);
+          const budget = Math.max(3, Math.min(45, Number.isFinite(seconds) && seconds > 0 ? seconds : 9)) * 1e3 + 3e4;
+          try {
+            await until(() => done(item) ? true : void 0, budget, signal);
+          } catch (error) {
+            if (signal.aborted) throw error;
+            throw new Halt("RECORD_TIMEOUT", `等待句子 ${String(item.id)} 录音超时，请检查麦克风和页面提示`);
+          }
+        }
       }
       return legacyValue(task.question, c.doRecord);
     }

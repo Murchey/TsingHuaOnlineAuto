@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.2.1
-// @description  日常练习填写、原题音频 Chivox 评测、legacy_18 MiMo TTS、真实麦克风录音、提交核对及故障诊断
+// @version      0.2.2
+// @description  日常练习填写、原题音频 Chivox 评测、legacy_18 MiMo TTS、unsafeWindow 组件桥接、提交核对及故障诊断
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      api.xiaomimimo.com
 // @sandbox      raw
 // @inject-into  page
@@ -386,10 +387,10 @@
     }
     conflict() {
       if (document.querySelector(".yunPanel")) return "检测到旧版 Yun 答题面板，请停用旧脚本并刷新后运行";
-      if (window.XMLHttpRequest?.name === "myXMLHttpRequest" || window.WebSocket?.name === "myWebSocket") {
+      const w = globalThis.unsafeWindow ?? window.unsafeWindow ?? window;
+      if (w.XMLHttpRequest?.name === "myXMLHttpRequest" || w.WebSocket?.name === "myWebSocket") {
         return "检测到旧版脚本的网络钩子，请停用旧脚本并刷新后运行";
       }
-      const w = window;
       if (w.yunAiRecorder || w.yunPlayer) return "检测到旧版脚本的播放器或录音钩子，请停用旧脚本并刷新";
       return null;
     }
@@ -797,15 +798,16 @@
     else job();
   }
   function legacyComponents() {
-    const w = window;
-    if (document.querySelector("app-root")?.getAttribute("ng-version") !== "7.2.16" || !document.querySelector("app-course-study-student") || !w.ng?.coreTokens?.ApplicationRef) return [];
+    const w = globalThis.unsafeWindow ?? window.unsafeWindow ?? window;
+    const doc = w.document;
+    if (!doc?.querySelector("app-root") || doc.querySelector("app-root")?.getAttribute("ng-version") !== "7.2.16" || !doc.querySelector("app-course-study-student") || !w.ng?.coreTokens?.ApplicationRef) return [];
     try {
       let walk2 = function(view) {
         if (!view || seen.has(view) || seen.size > 3e4) return;
         seen.add(view);
         for (const node of view.nodes || []) {
           if (node?.componentView) {
-            if (node.renderElement instanceof HTMLElement && node.componentView.component) {
+            if (node.renderElement?.nodeType === 1 && node.componentView.component) {
               result.push({ component: node.componentView.component, root: node.renderElement });
             }
             walk2(node.componentView);
@@ -815,7 +817,7 @@
       };
       var walk = walk2;
       if (!runtime) {
-        if (!Array.from(document.scripts).some((s) => /\/main\.4c93dc9c6da8077cd693\.js(?:\?|$)/.test(s.src)) || !Array.isArray(w.webpackJsonp)) return [];
+        if (!Array.from(doc.scripts).some((s) => /\/main\.4c93dc9c6da8077cd693\.js(?:\?|$)/.test(s.src)) || !Array.isArray(w.webpackJsonp)) return [];
         const key2 = "thoa-read-runtime-" + Math.random().toString(36).slice(2);
         w.webpackJsonp.push([[], { [key2]: (_m, _e, r) => {
           runtime = r;
@@ -1784,7 +1786,7 @@
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.2.1";
+      this.el("version").textContent = false ? "dev" : "0.2.2";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -1958,7 +1960,7 @@
       } catch {
       }
       return {
-        version: false ? "dev" : "0.2.1",
+        version: false ? "dev" : "0.2.2",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),
@@ -2069,9 +2071,10 @@
 
   // src/main.ts
   var key = Symbol.for("tsinghua-online-auto.instance");
-  var page = window;
+  var hostWindow = globalThis.unsafeWindow ?? window.unsafeWindow ?? window;
+  var page = hostWindow;
   function boot() {
-    if (window.top !== window.self) return;
+    if (hostWindow.top !== hostWindow.self) return;
     if (page[key]) {
       page[key].reveal();
       return;
@@ -2080,12 +2083,12 @@
     const panel = new Panel(new Controller(adapter, store), adapter, store);
     page[key] = panel;
     panel.mount();
-    window.addEventListener("pagehide", () => {
+    hostWindow.addEventListener("pagehide", () => {
       panel.dispose();
       delete page[key];
     }, { once: true });
   }
-  window.addEventListener("pageshow", (event) => {
+  hostWindow.addEventListener("pageshow", (event) => {
     if (event.persisted) boot();
   });
   if (document.documentElement) boot();

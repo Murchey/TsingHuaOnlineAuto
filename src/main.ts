@@ -4,18 +4,19 @@ import { Panel } from './panel';
 import { Store } from './storage';
 
 const key = Symbol.for('tsinghua-online-auto.instance');
-const page = window as unknown as Record<symbol, Panel | undefined>;
+const hostWindow = ((globalThis as any).unsafeWindow ?? (window as any).unsafeWindow ?? window) as Window;
+const page = hostWindow as unknown as Record<symbol, Panel | undefined>;
 function boot(): void {
-  if (window.top !== window.self) return;
+  if (hostWindow.top !== hostWindow.self) return;
   if (page[key]) { page[key]!.reveal(); return; }
   const adapter = new AdaptiveAdapter(), store = new Store();
   const panel = new Panel(new Controller(adapter, store), adapter, store);
   page[key] = panel;
   panel.mount();
-  window.addEventListener('pagehide', () => { panel.dispose(); delete page[key]; }, { once: true });
+  hostWindow.addEventListener('pagehide', () => { panel.dispose(); delete page[key]; }, { once: true });
 }
 
-window.addEventListener('pageshow', event => { if (event.persisted) boot(); });
+hostWindow.addEventListener('pageshow', event => { if (event.persisted) boot(); });
 
 // Works both at document-start and when a manager injects after window.load has fired.
 if (document.documentElement) boot();

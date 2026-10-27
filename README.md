@@ -1,17 +1,17 @@
 # 清华社英语在线练习助手
 
-TypeScript 用户脚本，可安装在脚本猫或篡改猴中。0.2.1 同时识别新版 Vue 阅读器与旧版 `/legacy/course-study-student/...` Angular 学习页。
+TypeScript 用户脚本，可安装在脚本猫或篡改猴中。0.2.2 同时识别新版 Vue 阅读器与旧版 `/legacy/course-study-student/...` Angular 学习页。
 
 ## 本次修复
 
-0.1.0 只支持新版阅读器，而实际登录的课程仍使用 Angular 7.2.16 旧版，导致一直显示“未检测到可用练习”。0.1.1 增加旧版组件发现、正常练习数据读取、UUID 题目标识及刷新恢复、旧版填写与提交适配。0.1.2 增加旧版角色扮演 `legacy_9` 的语音评测和右箭头连续下一题。0.1.3 扩展角色扮演组件与作答结构发现。0.1.4 修复 `legacy_9` 的句子匹配与角色过滤。0.2.0 兼容 `lib-listen-and-repeat-exercise-cs-study` 跟读变体，并把默认录音来源改为“原题音频 → Chivox 评测”。0.2.1 增加 `legacy_18` 角色扮演：选择角色后，用 MiMo TTS 合成该角色每句台词，再灌入原站 Chivox 取得真实评分和 `recordAudio`。面板新增 MiMo API Key、Base、TTS 模型与音色配置，Key 只保存在当前标签页会话。
+0.1.0 只支持新版阅读器，而实际登录的课程仍使用 Angular 7.2.16 旧版，导致一直显示“未检测到可用练习”。0.1.1 增加旧版组件发现、正常练习数据读取、UUID 题目标识及刷新恢复、旧版填写与提交适配。0.1.2 增加旧版角色扮演 `legacy_9` 的语音评测和右箭头连续下一题。0.1.3 扩展角色扮演组件与作答结构发现。0.1.4 修复 `legacy_9` 的句子匹配与角色过滤。0.2.0 兼容 `lib-listen-and-repeat-exercise-cs-study` 跟读变体，并把默认录音来源改为“原题音频 → Chivox 评测”。0.2.1 增加 `legacy_18` 角色扮演：选择角色后，用 MiMo TTS 合成该角色每句台词，再灌入原站 Chivox 取得真实评分和 `recordAudio`。面板新增 MiMo API Key、Base、TTS 模型与音色配置，Key 只保存在当前标签页会话。0.2.2 修复加入 GM 权限后脚本管理器隔离沙箱导致的组件桥接失败：旧版 `webpackJsonp/ng` 现在通过 `unsafeWindow` 访问。
 
 2026-10-27 在用户指定浏览器和真实题目上验证：type 9 的 7 句原题音频分别得到 89–96 分，服务器保存 7 条 Chivox 作答，页面 `exerciseStatus=2`，本地总分 13.18。旧版读取接口快速连续请求会返回 HTTP 530，脚本已加入仅针对 530 的退避重试。**`legacy_18` 的 MiMo TTS 代码与模拟测试已完成，但真实 MiMo API 调用需用户填写 Key 后验收。**
 
 ## 安装或更新
 
 1. 停用旧版“清华社视听说修改版 - 自动答题”和其他自动答题脚本，刷新网页。关闭旧面板不会撤销旧脚本已安装的网络与录音钩子。
-2. 在脚本猫／篡改猴编辑本助手，将 `dist/tsinghua-online-auto.user.js` 的**全部内容**替换进去，保存并启用。确认面板版本为 **0.2.1**；`.meta.js` 不能单独运行。
+2. 在脚本猫／篡改猴编辑本助手，将 `dist/tsinghua-online-auto.user.js` 的**全部内容**替换进去，保存并启用。确认面板版本为 **0.2.2**；`.meta.js` 不能单独运行。
 3. 刷新网页后进入课程或教材的日常练习。右下角面板应列出当前练习；旧版带“旧版”及待作答／结果页标记。
 4. 点击“开始”。服务器已有完整作答会保持原结果，不点击 Retry／ReChallenge。默认只处理当前块，不自动翻页或重做已提交练习。
 5. 首次实际提交后手动刷新确认记录仍存在。遇到问题点“导出诊断”。面板收起后点击右下角按钮或按 **Alt+Shift+T** 恢复。
@@ -54,6 +54,6 @@ npm run check
 
 `check` 执行类型检查、构建和测试，安装产物在 `dist/`。源码、测试及适配记录分别在 `src/`、`tests/`、`docs/`。`scripts/browser-console.ps1` 仅用于开发时通过 Windows UI Automation 操作已打开 DevTools 的指定浏览器窗口，必须传入主进程 `BrowserProcessId`；它不会启动浏览器。
 
-不保存密码、登录令牌或录音到仓库，不主动上传诊断，不依赖外部 CDN。`src/mimo.ts` 提供 MiMo TTS/AI 请求接口（`GM_xmlhttpRequest`、`api.xiaomimimo.com`），`legacy_18` 已使用 TTS 接口；AI 答案解析尚未接入业务流程。诊断不含题干、选项、答案、音频、Cookie 或 URL 查询参数；旧版路径中的账号段已脱敏。完整课程响应和公开站点资源仅保存在忽略的 `.cache/`，不交付。
+不保存密码、登录令牌或录音到仓库，不主动上传诊断，不依赖外部 CDN。`src/mimo.ts` 提供 MiMo TTS/AI 请求接口（`GM_xmlhttpRequest`、`api.xiaomimimo.com`），`legacy_18` 已使用 TTS 接口；AI 答案解析尚未接入业务流程。脚本同时申请 `unsafeWindow`，旧版 Angular 桥接不得依赖沙箱内的 `window.webpackJsonp`。诊断不含题干、选项、答案、音频、Cookie 或 URL 查询参数；旧版路径中的账号段已脱敏。完整课程响应和公开站点资源仅保存在忽略的 `.cache/`，不交付。
 
 项目采用仓库已有 GPL-3.0 许可证。旧脚本仅作为兼容性分析参考，未复制其代码或样式。

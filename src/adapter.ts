@@ -84,10 +84,10 @@ export class TsinghuaAdapter implements Adapter {
 
   conflict(): string | null {
     if (document.querySelector('.yunPanel')) return '检测到旧版 Yun 答题面板，请停用旧脚本并刷新后运行';
-    if (window.XMLHttpRequest?.name === 'myXMLHttpRequest' || window.WebSocket?.name === 'myWebSocket') {
+    const w = ((globalThis as any).unsafeWindow ?? (window as any).unsafeWindow ?? window) as any;
+    if (w.XMLHttpRequest?.name === 'myXMLHttpRequest' || w.WebSocket?.name === 'myWebSocket') {
       return '检测到旧版脚本的网络钩子，请停用旧脚本并刷新后运行';
     }
-    const w = window as Window & { yunAiRecorder?: unknown; yunPlayer?: unknown };
     if (w.yunAiRecorder || w.yunPlayer) return '检测到旧版脚本的播放器或录音钩子，请停用旧脚本并刷新';
     return null;
   }

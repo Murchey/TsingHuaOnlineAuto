@@ -18,13 +18,14 @@ export function runInLegacyZone(job: () => void): void {
 }
 
 export function legacyComponents(): { component: LegacyComponent; root: HTMLElement }[] {
-  const w = window as any;
-  if (document.querySelector('app-root')?.getAttribute('ng-version') !== '7.2.16' ||
-      !document.querySelector('app-course-study-student') || !w.ng?.coreTokens?.ApplicationRef) return [];
+  const w = ((globalThis as any).unsafeWindow ?? (window as any).unsafeWindow ?? window) as any;
+  const doc = w.document as Document;
+  if (!doc?.querySelector('app-root') || doc.querySelector('app-root')?.getAttribute('ng-version') !== '7.2.16' ||
+      !doc.querySelector('app-course-study-student') || !w.ng?.coreTokens?.ApplicationRef) return [];
   try {
     if (!runtime) {
       // Pin the bridge to the inspected build; unknown builds must fail closed.
-      if (!Array.from(document.scripts).some(s => /\/main\.4c93dc9c6da8077cd693\.js(?:\?|$)/.test(s.src)) ||
+      if (!Array.from(doc.scripts).some(s => /\/main\.4c93dc9c6da8077cd693\.js(?:\?|$)/.test(s.src)) ||
           !Array.isArray(w.webpackJsonp)) return [];
       const key = 'thoa-read-runtime-' + Math.random().toString(36).slice(2);
       w.webpackJsonp.push([[], { [key]: (_m: unknown, _e: unknown, r: Require) => { runtime = r; } }, [[key]]]);
@@ -39,7 +40,7 @@ export function legacyComponents(): { component: LegacyComponent; root: HTMLElem
       seen.add(view);
       for (const node of view.nodes || []) {
         if (node?.componentView) {
-          if (node.renderElement instanceof HTMLElement && node.componentView.component) {
+          if (node.renderElement?.nodeType === 1 && node.componentView.component) {
             result.push({ component: node.componentView.component, root: node.renderElement });
           }
           walk(node.componentView);

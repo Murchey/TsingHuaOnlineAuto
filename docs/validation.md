@@ -1,6 +1,6 @@
 # 验证记录
 
-日期：2026-10-27，版本 0.2.1。
+日期：2026-10-27，版本 0.2.2。
 
 ## 真实浏览器
 
@@ -39,6 +39,19 @@
 - 自动化测试覆盖 `legacy_18` 解析、roleId、所选角色完成判定、TTS 调用、Chivox 写回和缺少 Key 暂停；**尚未用真实 MiMo API Key 在浏览器中调用**。
 
 **尚未完成：用真实 MiMo Key 在第 9/47 题或同类新题上跑完整面板、Submit、结果页和刷新持久性复验。**
+
+## 0.2.2 隔离沙箱组件桥接
+
+用户导出的 0.2.1 诊断显示 route 正常、`legacyComponentCount=0`、`componentCount=0`、`units=[]`。现场确认页面仍为 Angular 7.2.16、主脚本哈希未变、`webpackJsonp` 与 `ng.coreTokens.ApplicationRef` 均存在。将 0.2.1 直接注入页面上下文可发现 32 个组件，说明桥接代码本身正常；差异来自新增 `@grant GM_xmlhttpRequest` 后脚本管理器使用隔离沙箱，沙箱内的 `window` 不是页面 window。
+
+0.2.2 的修复：
+
+- 构建元数据增加 `@grant unsafeWindow`。
+- `legacy-angular.ts` 优先用 `unsafeWindow` 读取页面 document、`webpackJsonp` 和 `ng`，并兼容 `unsafeWindow` 挂在 `window` 上的管理器。
+- `main.ts` 的实例 Symbol 和 `pageshow/pagehide` 也绑定到页面 window，避免隔离上下文重复注入或漏恢复。
+- 现场在页面设置 `window.unsafeWindow=window` 后注入 0.2.2，仍发现 32 个组件、1 个练习块，`legacyComponentCount` 不再为 0。
+
+**尚未完成：在用户实际脚本管理器中更新 0.2.2 后刷新，重新导出诊断确认页面组件可见。**
 
 ## 自动验证
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.1.2
+// @version      0.1.3
 // @description  日常练习填写、真实麦克风录音、提交核对及故障诊断
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*

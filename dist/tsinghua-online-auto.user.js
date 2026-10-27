@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.1.2
+// @version      0.1.3
 // @description  日常练习填写、真实麦克风录音、提交核对及故障诊断
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -572,7 +572,7 @@
 
   // src/legacy-data.ts
   function legacyQuestion(exercise) {
-    const e = object(exercise), type = Number(e.type);
+    const e = normalizeExercise(exercise), type = Number(e.type);
     const q = { id: String(e.id || ""), type: `legacy_${type}`, instruction: String(e.contentString || "") };
     if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
       q.children = e.exerciseList.map(legacyQuestion);
@@ -600,19 +600,56 @@
       q.answer = text(e.answer);
     } else if (type === 9) {
       q.type = "legacy_9";
+      const roles = arrayField(e, "roles", "roleList");
+      const sentItems = arrayField(e, "sentItems", "sentenceItems", "items");
       q.extension = {
-        roles: Array.isArray(e.roles) ? e.roles.map((r) => ({ id: object(r).id, name: object(r).name })) : [],
-        sentItems: Array.isArray(e.sentItems) ? e.sentItems.map((s) => ({
+        roles: roles.map((r) => ({ id: object(r).id, name: object(r).name })),
+        sentItems: sentItems.map((s) => ({
           idx: object(s).id,
           roleId: object(s).roleId,
           audioTime: object(s).audioTime,
-          text: text(object(s).styleText)
-        })) : []
+          text: richText(object(s).styleText ?? object(s).text ?? object(s).content)
+        }))
       };
     } else if (type === 20) {
       q.type = "oral_simple_speak";
     }
     return q;
+  }
+  function normalizeExercise(value) {
+    const root = object(value);
+    if (root.type != null && root.id != null) return root;
+    for (const key2 of ["exercise", "object", "item", "data"]) {
+      const nested = object(root[key2]);
+      if (nested.type != null || nested.id != null) return normalizeExercise(nested);
+    }
+    return root;
+  }
+  function arrayField(e, ...keys) {
+    for (const key2 of keys) {
+      if (Array.isArray(e[key2])) return e[key2];
+    }
+    for (const key2 of ["exercise", "object", "item", "data"]) {
+      const nested = object(e[key2]);
+      const found = arrayField(nested, ...keys);
+      if (found.length) return found;
+    }
+    return [];
+  }
+  function richText(value) {
+    if (typeof value === "string") return text(value);
+    const v = object(value);
+    if (typeof v.text === "string") return text(v.text);
+    const paragraphs = Array.isArray(v.paragraphs) ? v.paragraphs : [];
+    const chunks = [];
+    for (const p of paragraphs) {
+      const items = Array.isArray(object(p).contentItems) ? object(p).contentItems : [];
+      for (const item of items) {
+        const t = object(item).text;
+        if (typeof t === "string") chunks.push(t);
+      }
+    }
+    return chunks.join(" ").trim();
   }
   function legacyValue(q, record) {
     const a = object(record).answer;
@@ -630,10 +667,11 @@
   }
   function legacyData(payload) {
     const p = object(payload);
-    if (!object(p.exercise).id || !Number.isInteger(p.submitNum) || Number(p.submitNum) < 0) {
+    const exercise = normalizeExercise(p.exercise);
+    if (!exercise.id || !Number.isInteger(p.submitNum) || Number(p.submitNum) < 0) {
       throw new Halt("DATA_SHAPE", "旧版练习数据尚未加载或格式已变化");
     }
-    const q = legacyQuestion(p.exercise), records = [];
+    const q = legacyQuestion(exercise), records = [];
     function visit(question, record) {
       if (question.children) for (const child of question.children) visit(child, object(object(record).answer)[String(child.id)]);
       else if (record) records.push({ questionId: question.id, userAnswer: legacyValue(question, record) });
@@ -712,10 +750,28 @@
     }
     leaf(unit, task) {
       this.editable(unit);
-      const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) && String(c.exercise?.id) === String(task.question.id) && root.tagName.startsWith("LIB-") && typeof c.doRecordChange?.emit === "function" && !root.tagName.startsWith("LIB-ADAP-") && ![14, 15, 16, 25].includes(Number(c.exercise?.type)) && shown(root));
-      if (matches.length !== 1) throw new Halt("QUESTION_DOM", "旧版作答组件未就绪或存在重复，请重新检测");
-      if (matches[0].component.status !== 1) throw new Halt("READ_ONLY", "题目不处于可作答状态");
-      return matches[0];
+      const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) && String(c.exercise?.id) === String(task.question.id) && root.isConnected && typeof c.doRecordChange?.emit === "function" && shown(root));
+      const usable = matches.filter(({ component: c }) => ![14, 15, 16, 25].includes(Number(c.exercise?.type)));
+      if (!usable.length) throw new Halt("QUESTION_DOM", "旧版作答组件未就绪，请等待题目加载");
+      const rolePlay = task.question.type === "legacy_9";
+      const ranked = usable.map((entry) => {
+        const c = entry.component;
+        let score = 0;
+        if (rolePlay) {
+          if (Number(c.exercise?.type) === 9) score += 5;
+          if (typeof c.selectRole === "function") score += 4;
+          if (typeof c.start === "function") score += 4;
+          if (typeof c.playVadio === "function") score += 4;
+        } else if (!entry.root.tagName.startsWith("LIB-ADAP-")) score += 2;
+        score += entry.root.tagName.startsWith("LIB-") ? 1 : 0;
+        return { ...entry, score };
+      }).sort((a, b) => b.score - a.score);
+      const best = ranked[0];
+      if (!best || ranked.length > 1 && best.score === ranked[1].score) {
+        throw new Halt("QUESTION_DOM", "旧版作答组件未就绪或存在重复，请重新检测");
+      }
+      if (best.component.status !== 1) throw new Halt("READ_ONLY", "题目不处于可作答状态");
+      return best;
     }
     run(unit, job) {
       this.editable(unit);
@@ -832,16 +888,18 @@
       } finally {
         cancelled = true;
       }
-      const ext = object(task.question.extension), items = Array.isArray(ext.sentItems) ? ext.sentItems.map(object) : [];
-      const roles = Array.isArray(ext.roles) ? ext.roles.map(object) : [];
-      if (!items.length || !roles.length || typeof c.selectRole !== "function" || typeof c.start !== "function") {
+      const taskExt = object(task.question.extension);
+      const nativeExt = object(legacyRoleExtension(c.exercise));
+      const items = (Array.isArray(taskExt.sentItems) ? taskExt.sentItems : Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : []).map(object);
+      const roles = (Array.isArray(taskExt.roles) ? taskExt.roles : Array.isArray(nativeExt.roles) ? nativeExt.roles : []).map(object);
+      if (!items.length || !roles.length || typeof c.selectRole !== "function" || typeof c.start !== "function" || typeof c.playVadio !== "function") {
         throw new Halt("RECORDING_DOM", "角色扮演题缺少角色、句子或启动控件");
       }
       const roleId = c.doRecord?.roleId || roles[0].id;
       if (!roleId) throw new Halt("RECORDING_DOM", "角色扮演题没有可选角色");
       this.run(unit, () => c.selectRole(roleId));
       const roleStart = root.querySelector(".lib-role-select-start button");
-      if (roleStart && !c.isClose) roleStart.click();
+      if (roleStart) roleStart.click();
       else this.run(unit, () => c.start());
       await until(() => c.isClose === true || c.readingIndex != null ? true : void 0, 12e3, signal);
       for (const item of items) {
@@ -883,6 +941,12 @@
       return this.discover()[0];
     }
   };
+  function legacyRoleExtension(exercise) {
+    const e = object(exercise);
+    const roles = Array.isArray(e.roles) ? e.roles : Array.isArray(e.roleList) ? e.roleList : [];
+    const sentItems = Array.isArray(e.sentItems) ? e.sentItems : Array.isArray(e.sentenceItems) ? e.sentenceItems : Array.isArray(e.items) ? e.items : [];
+    return { roles, sentItems };
+  }
 
   // src/adaptive-adapter.ts
   var AdaptiveAdapter = class {
@@ -1164,7 +1228,7 @@
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.1.2";
+      this.el("version").textContent = false ? "dev" : "0.1.3";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("collapse").addEventListener("click", () => {
@@ -1327,7 +1391,7 @@
       } catch {
       }
       return {
-        version: false ? "dev" : "0.1.2",
+        version: false ? "dev" : "0.1.3",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

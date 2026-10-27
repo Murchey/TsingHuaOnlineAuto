@@ -69,12 +69,29 @@ export class LegacyAdapter implements Adapter {
   private leaf(unit: Unit, task: Task): { component: LegacyComponent; root: HTMLElement } {
     this.editable(unit);
     const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) &&
-      String(c.exercise?.id) === String(task.question.id) && root.tagName.startsWith('LIB-') &&
-      typeof c.doRecordChange?.emit === 'function' && !root.tagName.startsWith('LIB-ADAP-') &&
-      ![14, 15, 16, 25].includes(Number(c.exercise?.type)) && shown(root));
-    if (matches.length !== 1) throw new Halt('QUESTION_DOM', '旧版作答组件未就绪或存在重复，请重新检测');
-    if (matches[0].component.status !== 1) throw new Halt('READ_ONLY', '题目不处于可作答状态');
-    return matches[0];
+      String(c.exercise?.id) === String(task.question.id) && root.isConnected &&
+      typeof c.doRecordChange?.emit === 'function' && shown(root));
+    const usable = matches.filter(({ component: c }) => ![14, 15, 16, 25].includes(Number(c.exercise?.type)));
+    if (!usable.length) throw new Halt('QUESTION_DOM', '旧版作答组件未就绪，请等待题目加载');
+    const rolePlay = task.question.type === 'legacy_9';
+    const ranked = usable.map(entry => {
+      const c = entry.component;
+      let score = 0;
+      if (rolePlay) {
+        if (Number(c.exercise?.type) === 9) score += 5;
+        if (typeof c.selectRole === 'function') score += 4;
+        if (typeof c.start === 'function') score += 4;
+        if (typeof c.playVadio === 'function') score += 4;
+      } else if (!entry.root.tagName.startsWith('LIB-ADAP-')) score += 2;
+      score += entry.root.tagName.startsWith('LIB-') ? 1 : 0;
+      return { ...entry, score };
+    }).sort((a, b) => b.score - a.score);
+    const best = ranked[0];
+    if (!best || (ranked.length > 1 && best.score === ranked[1].score)) {
+      throw new Halt('QUESTION_DOM', '旧版作答组件未就绪或存在重复，请重新检测');
+    }
+    if (best.component.status !== 1) throw new Halt('READ_ONLY', '题目不处于可作答状态');
+    return best;
   }
   private run(unit: Unit, job: () => void): void {
     this.editable(unit);
@@ -171,16 +188,21 @@ export class LegacyAdapter implements Adapter {
       stream.getTracks().forEach(t => t.stop());
     } catch { throw new Halt('MICROPHONE', '麦克风权限被拒绝、取消或设备不可用'); }
     finally { cancelled = true; }
-    const ext = object(task.question.extension), items = Array.isArray(ext.sentItems) ? ext.sentItems.map(object) : [];
-    const roles = Array.isArray(ext.roles) ? ext.roles.map(object) : [];
-    if (!items.length || !roles.length || typeof c.selectRole !== 'function' || typeof c.start !== 'function') {
+    const taskExt = object(task.question.extension);
+    const nativeExt = object(legacyRoleExtension(c.exercise));
+    const items = (Array.isArray(taskExt.sentItems) ? taskExt.sentItems :
+      (Array.isArray(nativeExt.sentItems) ? nativeExt.sentItems : [])).map(object);
+    const roles = (Array.isArray(taskExt.roles) ? taskExt.roles :
+      (Array.isArray(nativeExt.roles) ? nativeExt.roles : [])).map(object);
+    if (!items.length || !roles.length || typeof c.selectRole !== 'function' ||
+        typeof c.start !== 'function' || typeof c.playVadio !== 'function') {
       throw new Halt('RECORDING_DOM', '角色扮演题缺少角色、句子或启动控件');
     }
     const roleId = c.doRecord?.roleId || roles[0].id;
     if (!roleId) throw new Halt('RECORDING_DOM', '角色扮演题没有可选角色');
     this.run(unit, () => c.selectRole(roleId));
     const roleStart = root.querySelector<HTMLButtonElement>('.lib-role-select-start button');
-    if (roleStart && !c.isClose) roleStart.click();
+    if (roleStart) roleStart.click();
     else this.run(unit, () => c.start());
     await until(() => c.isClose === true || c.readingIndex != null ? true : undefined, 12_000, signal);
     for (const item of items) {
@@ -222,4 +244,12 @@ export class LegacyAdapter implements Adapter {
     }, 20_000, signal);
     return this.discover()[0];
   }
+}
+
+function legacyRoleExtension(exercise: unknown): unknown {
+  const e = object(exercise);
+  const roles = Array.isArray(e.roles) ? e.roles : Array.isArray(e.roleList) ? e.roleList : [];
+  const sentItems = Array.isArray(e.sentItems) ? e.sentItems : Array.isArray(e.sentenceItems) ? e.sentenceItems :
+    Array.isArray(e.items) ? e.items : [];
+  return { roles, sentItems };
 }

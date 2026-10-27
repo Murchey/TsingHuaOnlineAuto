@@ -61,6 +61,21 @@ describe('legacy production route regression', () => {
     } } });
     expect(hasCompleteResponse(saved.questionVOList[0], saved.questionAnswerItemVOList![0].userAnswer)).toBe(true);
   });
+  it('finds role-play capability on the actual adap/listen component tags', () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-adap-exercise-cs-study></lib-adap-exercise-cs-study></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const roleExercise: any = { id: 'role-q', type: 9, roles: [{ id: 'role-1', name: 'Adrian' }],
+      sentItems: [{ id: 'sent-1', roleId: 'role-1', audioTime: '3' }] };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: roleExercise, pageTitle: 'Sample',
+      doRecord: { type: 9, answer: {} }, loadDoRecord() {}, doRecordChange: { emit: vi.fn() },
+      selectRole: vi.fn(), start: vi.fn(), playVadio: vi.fn() };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise: roleExercise, submitNum: 0 }))[0];
+    expect((adapter as any).leaf(unit, task).component).toBe(c);
+  });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());
     await controller.start(f.unit, { ...defaults, intervalMs: 0 });

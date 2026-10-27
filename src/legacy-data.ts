@@ -2,7 +2,7 @@ import { object, text } from './answers';
 import { Halt, type AnswerRecord, type ExerciseData, type Question } from './model';
 
 export function legacyQuestion(exercise: unknown): Question {
-  const e = object(exercise), type = Number(e.type);
+  const e = normalizeExercise(exercise), type = Number(e.type);
   const q: Question = { id: String(e.id || ''), type: `legacy_${type}`, instruction: String(e.contentString || '') };
   if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
     q.children = e.exerciseList.map(legacyQuestion); return q;
@@ -28,17 +28,57 @@ export function legacyQuestion(exercise: unknown): Question {
     q.type = 'essay_questions_answers'; q.answer = text(e.answer);
   } else if (type === 9) {
     q.type = 'legacy_9';
+    const roles = arrayField(e, 'roles', 'roleList');
+    const sentItems = arrayField(e, 'sentItems', 'sentenceItems', 'items');
     q.extension = {
-      roles: Array.isArray(e.roles) ? e.roles.map(r => ({ id: object(r).id, name: object(r).name })) : [],
-      sentItems: Array.isArray(e.sentItems) ? e.sentItems.map(s => ({
+      roles: roles.map(r => ({ id: object(r).id, name: object(r).name })),
+      sentItems: sentItems.map(s => ({
         idx: object(s).id, roleId: object(s).roleId, audioTime: object(s).audioTime,
-        text: text(object(s).styleText),
-      })) : [],
+        text: richText(object(s).styleText ?? object(s).text ?? object(s).content),
+      })),
     };
   } else if (type === 20) {
     q.type = 'oral_simple_speak';
   }
   return q;
+}
+
+function normalizeExercise(value: unknown): Record<string, unknown> {
+  const root = object(value);
+  if (root.type != null && root.id != null) return root;
+  for (const key of ['exercise', 'object', 'item', 'data']) {
+    const nested = object(root[key]);
+    if (nested.type != null || nested.id != null) return normalizeExercise(nested);
+  }
+  return root;
+}
+
+function arrayField(e: Record<string, unknown>, ...keys: string[]): unknown[] {
+  for (const key of keys) {
+    if (Array.isArray(e[key])) return e[key] as unknown[];
+  }
+  for (const key of ['exercise', 'object', 'item', 'data']) {
+    const nested = object(e[key]);
+    const found = arrayField(nested, ...keys);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function richText(value: unknown): string {
+  if (typeof value === 'string') return text(value);
+  const v = object(value);
+  if (typeof v.text === 'string') return text(v.text);
+  const paragraphs = Array.isArray(v.paragraphs) ? v.paragraphs : [];
+  const chunks: string[] = [];
+  for (const p of paragraphs) {
+    const items = Array.isArray(object(p).contentItems) ? object(p).contentItems as unknown[] : [];
+    for (const item of items) {
+      const t = object(item).text;
+      if (typeof t === 'string') chunks.push(t);
+    }
+  }
+  return chunks.join(' ').trim();
 }
 
 export function legacyValue(q: Question, record: unknown): unknown {
@@ -56,10 +96,11 @@ export function legacyValue(q: Question, record: unknown): unknown {
 
 export function legacyData(payload: unknown): ExerciseData {
   const p = object(payload);
-  if (!object(p.exercise).id || !Number.isInteger(p.submitNum) || Number(p.submitNum) < 0) {
+  const exercise = normalizeExercise(p.exercise);
+  if (!exercise.id || !Number.isInteger(p.submitNum) || Number(p.submitNum) < 0) {
     throw new Halt('DATA_SHAPE', '旧版练习数据尚未加载或格式已变化');
   }
-  const q = legacyQuestion(p.exercise), records: AnswerRecord[] = [];
+  const q = legacyQuestion(exercise), records: AnswerRecord[] = [];
   function visit(question: Question, record: unknown): void {
     if (question.children) for (const child of question.children) visit(child, object(object(record).answer)[String(child.id)]);
     else if (record) records.push({ questionId: question.id, userAnswer: legacyValue(question, record) });

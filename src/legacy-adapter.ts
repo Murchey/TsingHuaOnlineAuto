@@ -68,12 +68,14 @@ export class LegacyAdapter implements Adapter {
   }
   private leaf(unit: Unit, task: Task): { component: LegacyComponent; root: HTMLElement } {
     this.editable(unit);
-    const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) &&
-      String(c.exercise?.id) === String(task.question.id) && root.isConnected &&
-      typeof c.doRecordChange?.emit === 'function' && shown(root));
+    const rolePlay = task.question.type === 'legacy_9';
+    const matches = this.components().filter(({ component: c, root }) => unit.root.contains(root) && root.isConnected &&
+      typeof c.doRecordChange?.emit === 'function' && shown(root) &&
+      (String(c.exercise?.id) === String(task.question.id) ||
+       (rolePlay && (Number(c.exercise?.type) === 9 ||
+         typeof c.selectRole === 'function' || typeof c.start === 'function' || typeof c.playVadio === 'function'))));
     const usable = matches.filter(({ component: c }) => ![14, 15, 16, 25].includes(Number(c.exercise?.type)));
     if (!usable.length) throw new Halt('QUESTION_DOM', '旧版作答组件未就绪，请等待题目加载');
-    const rolePlay = task.question.type === 'legacy_9';
     const ranked = usable.map(entry => {
       const c = entry.component;
       let score = 0;
@@ -248,8 +250,34 @@ export class LegacyAdapter implements Adapter {
 
 function legacyRoleExtension(exercise: unknown): unknown {
   const e = object(exercise);
-  const roles = Array.isArray(e.roles) ? e.roles : Array.isArray(e.roleList) ? e.roleList : [];
-  const sentItems = Array.isArray(e.sentItems) ? e.sentItems : Array.isArray(e.sentenceItems) ? e.sentenceItems :
-    Array.isArray(e.items) ? e.items : [];
+  const findArray = (keys: string[]): unknown[] => {
+    for (const key of keys) {
+      const value = e[key];
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>);
+    }
+    for (const key of ['exercise', 'object', 'item', 'data']) {
+      const found = findArrayAt(e[key], keys);
+      if (found.length) return found;
+    }
+    return [];
+  };
+  const roles = findArray(['roles', 'roleList']);
+  const sentItems = findArray(['sentItems', 'sentenceItems', 'items']);
   return { roles, sentItems };
+}
+
+function findArrayAt(value: unknown, keys: string[]): unknown[] {
+  const e = object(value);
+  if (!Object.keys(e).length) return [];
+  for (const key of keys) {
+    const current = e[key];
+    if (Array.isArray(current)) return current;
+    if (current && typeof current === 'object') return Object.values(current as Record<string, unknown>);
+  }
+  for (const key of ['exercise', 'object', 'item', 'data']) {
+    const found = findArrayAt(e[key], keys);
+    if (found.length) return found;
+  }
+  return [];
 }

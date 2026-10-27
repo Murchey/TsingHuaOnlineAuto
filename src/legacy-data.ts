@@ -54,8 +54,10 @@ function normalizeExercise(value: unknown): Record<string, unknown> {
 }
 
 function arrayField(e: Record<string, unknown>, ...keys: string[]): unknown[] {
+  if (!Object.keys(e).length) return [];
   for (const key of keys) {
     if (Array.isArray(e[key])) return e[key] as unknown[];
+    if (e[key] && typeof e[key] === 'object') return Object.values(e[key] as Record<string, unknown>);
   }
   for (const key of ['exercise', 'object', 'item', 'data']) {
     const nested = object(e[key]);

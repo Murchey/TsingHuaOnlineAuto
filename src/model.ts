@@ -37,16 +37,18 @@ export interface Task {
   value?: unknown;
 }
 
+export type RolePlayAudioMode = 'original' | 'sample' | 'microphone';
+
 export interface Settings {
   allLoaded: boolean;
   recordingSeconds: number;
-  rolePlayExampleAudio: boolean;
+  rolePlayAudioMode: RolePlayAudioMode;
   timeoutMs: number;
   intervalMs: number;
 }
 
 export const defaults: Settings = {
-  allLoaded: false, recordingSeconds: 10, rolePlayExampleAudio: true, timeoutMs: 30_000, intervalMs: 350,
+  allLoaded: false, recordingSeconds: 10, rolePlayAudioMode: 'original', timeoutMs: 30_000, intervalMs: 350,
 };
 
 export class Halt extends Error {

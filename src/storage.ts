@@ -16,12 +16,13 @@ export class Store {
   settings(): Settings {
     try {
       const raw = JSON.parse(this.storage.getItem(prefix + 'settings') || '{}');
+      const mode = ['original', 'sample', 'microphone'].includes(raw.rolePlayAudioMode) ? raw.rolePlayAudioMode :
+        (raw.rolePlayExampleAudio === false ? 'microphone' : defaults.rolePlayAudioMode);
       return {
         allLoaded: raw.allLoaded === true,
         recordingSeconds: typeof raw.recordingSeconds === 'number' && Number.isFinite(raw.recordingSeconds) ?
           Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
-        rolePlayExampleAudio: typeof raw.rolePlayExampleAudio === 'boolean' ?
-          raw.rolePlayExampleAudio : defaults.rolePlayExampleAudio,
+        rolePlayAudioMode: mode,
         timeoutMs: defaults.timeoutMs, intervalMs: defaults.intervalMs,
       };
     } catch { return { ...defaults }; }

@@ -9,7 +9,8 @@ const script = readFileSync('dist/tsinghua-online-auto.user.js', 'utf8');
 
 describe('built userscript in an isolated production Vue application', () => {
   it('has no required CDN libraries and uses a separate identity from the legacy script', () => {
-    expect(script).toContain('// @grant        none');
+    expect(script).toContain('// @grant        GM_xmlhttpRequest');
+    expect(script).toContain('// @connect      api.xiaomimimo.com');
     expect(script).toContain('// @inject-into  page');
     expect(script).not.toMatch(/\/\/ @require\s/);
     expect(script).not.toContain('update.greasyfork.org/scripts/452423');

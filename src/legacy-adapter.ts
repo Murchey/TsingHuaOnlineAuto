@@ -1,8 +1,9 @@
 import { bounded, check, sleep, until } from './async';
 import { canonical, object, stable } from './answers';
+import { scoreWithChivox } from './chivox';
 import { routePath, shown, TsinghuaAdapter } from './adapter';
 import { legacyComponents, runInLegacyZone, type LegacyComponent } from './legacy-angular';
-import { legacyData, legacyValue } from './legacy-data';
+import { legacyData, legacyValue, richText } from './legacy-data';
 import { Halt, type Adapter, type ExerciseData, type Settings, type Task, type Unit } from './model';
 
 export function legacyRoute(): boolean {
@@ -235,26 +236,45 @@ export class LegacyAdapter implements Adapter {
     const complete = () => target.every(done);
     if (complete()) return legacyValue(task.question, c.doRecord);
 
-    if (settings.rolePlayExampleAudio) {
-      const urls = await Promise.all(target.map(item => this.exampleAudioUrl(c, item, settings, signal)));
-      check(signal); this.editable(unit);
-      this.run(unit, () => {
-        const record = object(c.doRecord);
-        if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
-        const current = record.answer as Record<string, unknown>;
-        const targetIds = new Set(target.map(item => String(item.id)));
-        for (const id of Object.keys(current)) {
-          if (!targetIds.has(id) && !object(current[id]).recordAudio) delete current[id];
+    if (settings.rolePlayAudioMode === 'original' || settings.rolePlayAudioMode === 'sample') {
+      if (settings.rolePlayAudioMode === 'original') {
+        const speech = this.speechAssessment();
+        for (const item of target) {
+          if (done(item)) continue;
+          const result = await this.scoreOriginalItem(c, item, speech, settings, signal);
+          check(signal); this.editable(unit);
+          this.run(unit, () => {
+            const record = object(c.doRecord);
+            if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+            const current = record.answer as Record<string, unknown>;
+            const id = String(item.id);
+            current[id] = { ...roleAnswer(), ...object(current[id]), ...result };
+            if (typeof c.dataChange === 'function') c.dataChange();
+            else c.doRecordChange.emit(record);
+          });
+          await sleep(80, signal);
         }
-        target.forEach((item, index) => {
-          const id = String(item.id);
-          current[id] = { ...roleAnswer(), ...object(current[id]), recordAudio: urls[index] };
+      } else {
+        const urls = await Promise.all(target.map(item => this.resolveAudioUrl(c, item, settings, signal)));
+        check(signal); this.editable(unit);
+        this.run(unit, () => {
+          const record = object(c.doRecord);
+          if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+          const current = record.answer as Record<string, unknown>;
+          const targetIds = new Set(target.map(item => String(item.id)));
+          for (const id of Object.keys(current)) {
+            if (!targetIds.has(id) && !object(current[id]).recordAudio) delete current[id];
+          }
+          target.forEach((item, index) => {
+            const id = String(item.id);
+            current[id] = { ...roleAnswer(), ...object(current[id]), recordAudio: urls[index] };
+          });
+          if (typeof c.dataChange === 'function') c.dataChange();
+          else c.doRecordChange.emit(record);
         });
-        if (typeof c.dataChange === 'function') c.dataChange();
-        else c.doRecordChange.emit(record);
-      });
+      }
       await sleep(80, signal); this.editable(unit);
-      if (!complete()) throw new Halt('EXAMPLE_AUDIO', '示例音频已解析，但网页未接收跟读作答，请导出诊断');
+      if (!complete()) throw new Halt('AUDIO_RESOLVE', '音频已处理，但网页未接收跟读作答，请导出诊断');
       return legacyValue(task.question, c.doRecord);
     }
 
@@ -309,7 +329,34 @@ export class LegacyAdapter implements Adapter {
     }
     return legacyValue(task.question, c.doRecord);
   }
-  private async exampleAudioUrl(c: LegacyComponent, item: Record<string, unknown>, settings: Settings,
+  private speechAssessment(): LegacyComponent {
+    const found = this.components().find(({ component: c }) =>
+      c.chivoxRecorder?.context && typeof c.speechService?.startSentence === 'function');
+    if (!found) throw new Halt('SPEECH_INIT', '原站 Chivox 语音评测组件尚未初始化，请刷新页面后重试');
+    return found.component;
+  }
+  private async scoreOriginalItem(c: LegacyComponent, item: Record<string, unknown>, speech: LegacyComponent,
+    settings: Settings, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const source = item.audio ?? item.audioUrl ?? item.resId;
+    if (typeof source !== 'string' || !source.trim()) {
+      throw new Halt('ORIGINAL_AUDIO', `句子 ${String(item.id)} 没有原题音频，请切换为真实麦克风模式`);
+    }
+    const text = richText(item.styleText ?? item.text ?? item.content);
+    if (!text) throw new Halt('ORIGINAL_AUDIO', `句子 ${String(item.id)} 没有可评测文本`);
+    const url = await this.resolveAudioUrl(c, item, settings, signal);
+    let audio: ArrayBuffer;
+    try {
+      audio = await bounded(fetch(url, { credentials: 'omit' }).then(response => {
+        if (!response.ok) throw new Halt('ORIGINAL_AUDIO', `原题音频下载失败（HTTP ${response.status}）`);
+        return response.arrayBuffer();
+      }), settings.timeoutMs, signal);
+    } catch (error) {
+      if (error instanceof Halt) throw error;
+      throw new Halt('ORIGINAL_AUDIO', '原题音频下载失败，请检查网络或登录状态');
+    }
+    return scoreWithChivox(speech, text, audio, settings.timeoutMs, signal) as unknown as Record<string, unknown>;
+  }
+  private async resolveAudioUrl(c: LegacyComponent, item: Record<string, unknown>, settings: Settings,
     signal: AbortSignal): Promise<string> {
     const raw = item.audio ?? item.audioUrl ?? item.resId;
     if (typeof raw === 'string') {
@@ -317,12 +364,12 @@ export class LegacyAdapter implements Adapter {
       if (direct) return direct;
     }
     if (typeof raw !== 'string' || !raw.trim()) {
-      throw new Halt('EXAMPLE_AUDIO', `角色扮演句子 ${String(item.id)} 缺少示例音频`);
+      throw new Halt('AUDIO_RESOLVE', `角色扮演句子 ${String(item.id)} 缺少音频`);
     }
     const service = c.getWebUrlService ?? c.webUrlService;
     const source = typeof service?.getResUrl === 'function' ? service.getResUrl(raw, 2) : undefined;
     if (typeof source?.subscribe !== 'function') {
-      throw new Halt('EXAMPLE_AUDIO', '页面未提供示例音频解析服务，请关闭“角色扮演使用示例音频”后重试');
+      throw new Halt('AUDIO_RESOLVE', '页面未提供音频解析服务，请关闭“角色扮演使用音频”后重试');
     }
     let subscription: { unsubscribe(): void } | undefined;
     try {
@@ -331,11 +378,11 @@ export class LegacyAdapter implements Adapter {
       }), settings.timeoutMs, signal);
       const url = object(response).url;
       if (typeof url === 'string' && url.trim()) return new URL(url, location.href).href;
-      throw new Halt('EXAMPLE_AUDIO', `角色扮演句子 ${String(item.id)} 的示例音频地址为空`);
+      throw new Halt('AUDIO_RESOLVE', `角色扮演句子 ${String(item.id)} 的音频地址为空`);
     } catch (error) {
       if (error instanceof Halt) throw error;
       const status = Number(object(error).status);
-      throw new Halt('EXAMPLE_AUDIO', `角色扮演示例音频解析失败${status ? `（HTTP ${status}）` : ''}，请检查网络或关闭示例音频模式`);
+      throw new Halt('AUDIO_RESOLVE', `角色扮演音频解析失败${status ? `（HTTP ${status}）` : ''}，请检查网络或关闭音频模式`);
     } finally { subscription?.unsubscribe(); }
   }
   async submit(unit: Unit, signal: AbortSignal): Promise<void> {

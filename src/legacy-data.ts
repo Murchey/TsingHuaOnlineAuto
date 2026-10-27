@@ -68,7 +68,7 @@ function arrayField(e: Record<string, unknown>, ...keys: string[]): unknown[] {
   return [];
 }
 
-function richText(value: unknown): string {
+export function richText(value: unknown): string {
   if (typeof value === 'string') return text(value);
   const v = object(value);
   if (typeof v.text === 'string') return text(v.text);

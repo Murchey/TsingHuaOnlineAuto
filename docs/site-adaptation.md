@@ -16,7 +16,9 @@
 
 提交只点击当前块唯一可见的 Submit 按钮。站点自行处理提交、签名和结果；脚本通过前述正常读取再次核对 `submitNum` 与逐题作答内容，失败不自动重发。20 型普通录音使用网站真实 MP3Recorder 和上传流程。
 
-角色扮演 9 型的 `sentItems[]` 同时包含用户角色和对话角色，只有用户角色句子会产生 `doRecord.answer[id].recordAudio`。原站 `changeAudioUrl()` 会播放对话角色示例，并对用户角色句子自动调用 Chivox；逐句调用 `playVadio()` 会与录音状态机竞争。0.1.4 起只处理所选角色，并默认调用原站 `getWebUrlService.getResUrl(sentItem.audio, 2)` 解析示例音频 URL，写入标准 answer 结构的 `recordAudio` 后触发 `dataChange()`，不申请麦克风或调用 Chivox。该模式不生成评分；关闭面板选项后仍按原站自动流程等待真实麦克风结果。其他旧版评测变体继续暂停。示例音频地址是否被 Submit 接口接受尚未在真实账号验收。
+角色扮演/跟读 9 型有两种实际组件：带 `selectRole/start` 的角色选择变体，以及 `lib-listen-and-repeat-exercise-cs-study` 整段跟读变体。两种都从 `getWebUrlService.getResUrl(sentItem.audio, 2)` 解析原题 MP3。0.2.0 默认执行“原题音频 → Chivox 评测”：页面 `fetch` 下载音频，在录音器自己的 AudioContext 中解码，静音麦克风和扬声器，把 BufferSource 连接到 `Html5Recorder.node`，再通过 `speechService.startSentence(text, duration)` 触发原站评测。Chivox 返回真实分数和稳定 `recordAudio` 后写回 `doRecord.answer` 并触发 `dataChange()`。
+
+角色选择变体只处理所选角色句子；跟读变体处理全部句子。原题缺少音频时暂停，不伪造分数。面板另保留“原题音频直填（不评分）”和“真实麦克风”排障模式。MiMo TTS/AI 接口已在 `src/mimo.ts` 预留，但未接入本流程。其他旧版评测变体继续暂停。
 
 ## 新版 Vue
 

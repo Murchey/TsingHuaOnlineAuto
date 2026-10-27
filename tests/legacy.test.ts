@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LegacyAdapter, legacyRoute } from '../src/legacy-adapter';
 import { legacyData } from '../src/legacy-data';
 import { planTasks, hasCompleteResponse } from '../src/answers';
 import { Controller } from '../src/controller';
 import { Store } from '../src/storage';
 import { defaults } from '../src/model';
+import { scoreWithChivox } from '../src/chivox';
+
+vi.mock('../src/chivox', () => ({ scoreWithChivox: vi.fn() }));
 
 const path = '/legacy/course-study-student/10/20/30/example-key';
 const signal = () => new AbortController().signal;
@@ -35,7 +38,8 @@ function fixture(saved = false) {
   return { adapter, server, c, leaf, submit, changes, root, unit: adapter.discover()[0] };
 }
 
-beforeEach(() => { localStorage.clear(); history.replaceState({}, '', path); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); history.replaceState({}, '', path); });
+afterEach(() => vi.unstubAllGlobals());
 
 describe('legacy production route regression', () => {
   it('recognizes the actual legacy student route and excludes teacher and examination routes', () => {
@@ -115,7 +119,7 @@ describe('legacy production route regression', () => {
     const unit = adapter.discover()[0];
     const data = legacyData({ exercise: roleExercise, submitNum: 0, doRecord: c.doRecord });
     const task = planTasks(data)[0];
-    const value = await adapter.record(unit, task, defaults, signal());
+    const value = await adapter.record(unit, task, { ...defaults, rolePlayAudioMode: 'sample' }, signal());
     expect(c.selectRole).toHaveBeenCalledWith('role-a');
     expect(c.start).not.toHaveBeenCalled(); expect(c.playVadio).not.toHaveBeenCalled();
     expect(c.doRecord.answer['b-1']).toBeUndefined();
@@ -150,13 +154,73 @@ describe('legacy production route regression', () => {
     const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
     const unit = adapter.discover()[0];
     const task = planTasks(legacyData({ exercise: roleExercise, submitNum: 0, doRecord: c.doRecord }))[0];
-    const value = await adapter.record(unit, task, defaults, signal());
+    const value = await adapter.record(unit, task, { ...defaults, rolePlayAudioMode: 'sample' }, signal());
     expect(c.sayBy).not.toHaveBeenCalled(); expect(c.playVadio).not.toHaveBeenCalled();
     expect(c.doRecord.answer['l-1'].recordAudio).toBe('https://cdn.example/res-l1.mp3');
     expect(c.doRecord.answer['l-2'].recordAudio).toBe('https://cdn.example/res-l2.mp3');
     expect(value).toEqual([{ idx: 'l-1', audio: 'https://cdn.example/res-l1.mp3' },
       { idx: 'l-2', audio: 'https://cdn.example/res-l2.mp3' }]);
     expect(changes).toHaveBeenCalled();
+  });
+  it('scores original question audio through Chivox and writes real results', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-listen-and-repeat-exercise-cs-study></lib-listen-and-repeat-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const roleExercise: any = { id: 'original-q', type: 9,
+      roles: [{ id: 'role-a', name: 'A' }, { id: 'role-b', name: 'B' }],
+      sentItems: [
+        { id: 'o-1', roleId: 'role-a', audio: 'res-o1', audioTime: '0', styleText: { paragraphs: [{ contentItems: [{ text: 'One' }] }] } },
+        { id: 'o-2', roleId: 'role-b', audio: 'res-o2', audioTime: '0', styleText: { paragraphs: [{ contentItems: [{ text: 'Two' }] }] } },
+      ] };
+    const empty = () => ({ score: 0, accuracy: 0, fluency: 0, senseGroup: 0, speed: 0, stress: 0,
+      integrity: 0, rhythm: 0, pron: 0, recordAudio: '', words: [], ccode: {}, result: '' });
+    const changes = vi.fn();
+    const getResUrl = vi.fn((id: string) => ({ subscribe: ({ next }: any) => {
+      next({ url: `https://cdn.example/${id}.mp3` }); return { unsubscribe: vi.fn() };
+    } }));
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: roleExercise, pageTitle: 'Original Sample',
+      doRecord: { type: 9, answer: { 'o-1': empty(), 'o-2': empty() } }, loadDoRecord() {},
+      doRecordChange: { emit: changes }, getWebUrlService: { getResUrl },
+      dataChange() { changes(this.doRecord); }, sayBy: vi.fn(), playVadio: vi.fn() };
+    const speech: any = { chivoxRecorder: { context: {} }, speechService: { startSentence: vi.fn() } };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c },
+      { root: document.createElement('div'), component: speech }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise: roleExercise, submitNum: 0, doRecord: c.doRecord }))[0];
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(scoreWithChivox).mockResolvedValueOnce({ score: 91, accuracy: 92, fluency: 90, senseGroup: 0,
+      speed: 0, stress: 0, integrity: 0, rhythm: 0, pron: 0, recordAudio: 'https://chivox.example/1.mp3', words: [], ccode: {}, result: '' })
+      .mockResolvedValueOnce({ score: 93, accuracy: 94, fluency: 92, senseGroup: 0,
+        speed: 0, stress: 0, integrity: 0, rhythm: 0, pron: 0, recordAudio: 'https://chivox.example/2.mp3', words: [], ccode: {}, result: '' });
+    const value = await adapter.record(unit, task, defaults, signal());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(scoreWithChivox).toHaveBeenCalledTimes(2);
+    expect(c.doRecord.answer['o-1'].score).toBe(91);
+    expect(c.doRecord.answer['o-1'].recordAudio).toBe('https://chivox.example/1.mp3');
+    expect(c.doRecord.answer['o-2'].score).toBe(93);
+    expect(value).toEqual([{ idx: 'o-1', audio: 'https://chivox.example/1.mp3' },
+      { idx: 'o-2', audio: 'https://chivox.example/2.mp3' }]);
+    expect(changes).toHaveBeenCalled();
+  });
+  it('pauses instead of fabricating a score when an original sentence has no audio', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-listen-and-repeat-exercise-cs-study></lib-listen-and-repeat-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const roleExercise: any = { id: 'no-audio-q', type: 9, roles: [{ id: 'role-a', name: 'A' }],
+      sentItems: [{ id: 'n-1', roleId: 'role-a', audioTime: '0', styleText: { paragraphs: [{ contentItems: [{ text: 'No audio' }] }] } }] };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: roleExercise, pageTitle: 'No Audio',
+      doRecord: { type: 9, answer: { 'n-1': { recordAudio: '' } } }, loadDoRecord() {},
+      doRecordChange: { emit: vi.fn() }, getWebUrlService: { getResUrl: vi.fn() },
+      dataChange: vi.fn(), sayBy: vi.fn() };
+    const speech: any = { chivoxRecorder: { context: {} }, speechService: { startSentence: vi.fn() } };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c },
+      { root: document.createElement('div'), component: speech }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise: roleExercise, submitNum: 0, doRecord: c.doRecord }))[0];
+    await expect(adapter.record(unit, task, defaults, signal())).rejects.toThrow('没有原题音频');
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());

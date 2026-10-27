@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.1.4
-// @description  日常练习填写、角色扮演示例音频代录、真实麦克风录音、提交核对及故障诊断
+// @version      0.2.0
+// @description  日常练习填写、原题音频 Chivox 评测、真实麦克风录音、MiMo API 接口预留、提交核对及故障诊断
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      api.xiaomimimo.com
 // @sandbox      raw
 // @inject-into  page
 // @noframes
@@ -18,7 +19,7 @@
   var defaults = {
     allLoaded: false,
     recordingSeconds: 10,
-    rolePlayExampleAudio: true,
+    rolePlayAudioMode: "original",
     timeoutMs: 3e4,
     intervalMs: 350
   };
@@ -535,6 +536,135 @@
     }
   };
 
+  // src/chivox.ts
+  var numberValue = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+  async function scoreWithChivox(speech, text2, audio, timeoutMs, signal) {
+    const recorder = speech.chivoxRecorder, service = speech.speechService;
+    if (!recorder?.context || !recorder.node || !recorder.inputPoint || typeof service?.startSentence !== "function" || typeof recorder.record !== "function") {
+      throw new Halt("SPEECH_INIT", "原站 Chivox 录音器尚未初始化，请刷新页面后重试");
+    }
+    if (service.observer) {
+      try {
+        service.stop();
+      } catch {
+      }
+      await sleep(250, signal);
+    }
+    if (service.observer) throw new Halt("SPEECH_BUSY", "原站语音评测仍在运行，请稍后重试");
+    const context = recorder.context;
+    let audioBuffer;
+    try {
+      audioBuffer = await context.decodeAudioData(audio.slice(0));
+    } catch {
+      throw new Halt("TTS_AUDIO", "TTS 音频无法由浏览器解码");
+    }
+    const originalRecord = recorder.record.bind(recorder), originalGain = recorder.inputPoint.gain.value;
+    let source, silent;
+    let subscription, finished = false;
+    const restore = () => {
+      recorder.record = originalRecord;
+      try {
+        recorder.inputPoint.gain.value = originalGain;
+      } catch {
+      }
+      try {
+        source?.stop();
+      } catch {
+      }
+      try {
+        source?.disconnect();
+      } catch {
+      }
+      try {
+        recorder.node.disconnect();
+      } catch {
+      }
+      try {
+        silent?.disconnect();
+      } catch {
+      }
+      try {
+        recorder.node.connect(context.destination);
+      } catch {
+      }
+    };
+    recorder.record = function(options) {
+      const onStart = options?.onStart;
+      options = { ...options, onStart: (...args) => {
+        try {
+          if (!finished && !signal.aborted) {
+            recorder.inputPoint.gain.value = 0;
+            try {
+              recorder.node.disconnect();
+            } catch {
+            }
+            const mute = context.createGain();
+            silent = mute;
+            mute.gain.value = 0;
+            mute.connect(context.destination);
+            recorder.node.connect(mute);
+            const player = context.createBufferSource();
+            source = player;
+            player.buffer = audioBuffer;
+            player.connect(recorder.node);
+            player.onended = () => setTimeout(() => {
+              if (!finished) {
+                try {
+                  service.stop();
+                } catch {
+                }
+              }
+            }, 800);
+            player.start();
+          }
+        } catch (error) {
+          finished = true;
+          throw error;
+        }
+        if (typeof onStart === "function") onStart(...args);
+      } };
+      return originalRecord(options);
+    };
+    try {
+      const result = await bounded(new Promise((resolve, reject) => {
+        subscription = service.startSentence(text2, Math.max(8e3, Math.round(audioBuffer.duration * 1e3) + 5e3)).subscribe({ next: resolve, error: reject });
+      }), Math.max(3e4, timeoutMs), signal);
+      finished = true;
+      const recordAudio = typeof result?.recordAudio === "string" ? result.recordAudio : "";
+      if (!recordAudio) throw new Halt("SPEECH_SCORE", "Chivox 没有返回录音地址");
+      return {
+        score: numberValue(result.score),
+        accuracy: numberValue(result.accuracy),
+        fluency: numberValue(result.fluency),
+        senseGroup: numberValue(result.senseGroup),
+        speed: numberValue(result.speed),
+        stress: numberValue(result.stress),
+        integrity: numberValue(result.integrity),
+        rhythm: numberValue(result.rhythm),
+        pron: numberValue(result.pron),
+        recordAudio,
+        words: Array.isArray(result.words) ? result.words : [],
+        ccode: result.ccode ?? {},
+        result: String(result.result ?? "")
+      };
+    } catch (error) {
+      finished = true;
+      try {
+        service.stop();
+      } catch {
+      }
+      if (error instanceof Halt) throw error;
+      const message = typeof error === "string" ? error : error?.errMessage;
+      throw new Halt("SPEECH_SCORE", `Chivox 评测失败${typeof message === "string" && message ? `：${message.slice(0, 160)}` : ""}`);
+    } finally {
+      subscription?.unsubscribe();
+      restore();
+    }
+  }
+
   // src/legacy-angular.ts
   var runtime;
   var application;
@@ -936,28 +1066,48 @@
       };
       const complete = () => target.every(done);
       if (complete()) return legacyValue(task.question, c.doRecord);
-      if (settings.rolePlayExampleAudio) {
-        const urls = await Promise.all(target.map((item) => this.exampleAudioUrl(c, item, settings, signal)));
-        check(signal);
-        this.editable(unit);
-        this.run(unit, () => {
-          const record = object(c.doRecord);
-          if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
-          const current = record.answer;
-          const targetIds = new Set(target.map((item) => String(item.id)));
-          for (const id2 of Object.keys(current)) {
-            if (!targetIds.has(id2) && !object(current[id2]).recordAudio) delete current[id2];
+      if (settings.rolePlayAudioMode === "original" || settings.rolePlayAudioMode === "sample") {
+        if (settings.rolePlayAudioMode === "original") {
+          const speech = this.speechAssessment();
+          for (const item of target) {
+            if (done(item)) continue;
+            const result = await this.scoreOriginalItem(c, item, speech, settings, signal);
+            check(signal);
+            this.editable(unit);
+            this.run(unit, () => {
+              const record = object(c.doRecord);
+              if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+              const current = record.answer;
+              const id2 = String(item.id);
+              current[id2] = { ...roleAnswer(), ...object(current[id2]), ...result };
+              if (typeof c.dataChange === "function") c.dataChange();
+              else c.doRecordChange.emit(record);
+            });
+            await sleep(80, signal);
           }
-          target.forEach((item, index) => {
-            const id2 = String(item.id);
-            current[id2] = { ...roleAnswer(), ...object(current[id2]), recordAudio: urls[index] };
+        } else {
+          const urls = await Promise.all(target.map((item) => this.resolveAudioUrl(c, item, settings, signal)));
+          check(signal);
+          this.editable(unit);
+          this.run(unit, () => {
+            const record = object(c.doRecord);
+            if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+            const current = record.answer;
+            const targetIds = new Set(target.map((item) => String(item.id)));
+            for (const id2 of Object.keys(current)) {
+              if (!targetIds.has(id2) && !object(current[id2]).recordAudio) delete current[id2];
+            }
+            target.forEach((item, index) => {
+              const id2 = String(item.id);
+              current[id2] = { ...roleAnswer(), ...object(current[id2]), recordAudio: urls[index] };
+            });
+            if (typeof c.dataChange === "function") c.dataChange();
+            else c.doRecordChange.emit(record);
           });
-          if (typeof c.dataChange === "function") c.dataChange();
-          else c.doRecordChange.emit(record);
-        });
+        }
         await sleep(80, signal);
         this.editable(unit);
-        if (!complete()) throw new Halt("EXAMPLE_AUDIO", "示例音频已解析，但网页未接收跟读作答，请导出诊断");
+        if (!complete()) throw new Halt("AUDIO_RESOLVE", "音频已处理，但网页未接收跟读作答，请导出诊断");
         return legacyValue(task.question, c.doRecord);
       }
       if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
@@ -1007,19 +1157,44 @@
       }
       return legacyValue(task.question, c.doRecord);
     }
-    async exampleAudioUrl(c, item, settings, signal) {
+    speechAssessment() {
+      const found = this.components().find(({ component: c }) => c.chivoxRecorder?.context && typeof c.speechService?.startSentence === "function");
+      if (!found) throw new Halt("SPEECH_INIT", "原站 Chivox 语音评测组件尚未初始化，请刷新页面后重试");
+      return found.component;
+    }
+    async scoreOriginalItem(c, item, speech, settings, signal) {
+      const source = item.audio ?? item.audioUrl ?? item.resId;
+      if (typeof source !== "string" || !source.trim()) {
+        throw new Halt("ORIGINAL_AUDIO", `句子 ${String(item.id)} 没有原题音频，请切换为真实麦克风模式`);
+      }
+      const text2 = richText(item.styleText ?? item.text ?? item.content);
+      if (!text2) throw new Halt("ORIGINAL_AUDIO", `句子 ${String(item.id)} 没有可评测文本`);
+      const url = await this.resolveAudioUrl(c, item, settings, signal);
+      let audio;
+      try {
+        audio = await bounded(fetch(url, { credentials: "omit" }).then((response) => {
+          if (!response.ok) throw new Halt("ORIGINAL_AUDIO", `原题音频下载失败（HTTP ${response.status}）`);
+          return response.arrayBuffer();
+        }), settings.timeoutMs, signal);
+      } catch (error) {
+        if (error instanceof Halt) throw error;
+        throw new Halt("ORIGINAL_AUDIO", "原题音频下载失败，请检查网络或登录状态");
+      }
+      return scoreWithChivox(speech, text2, audio, settings.timeoutMs, signal);
+    }
+    async resolveAudioUrl(c, item, settings, signal) {
       const raw = item.audio ?? item.audioUrl ?? item.resId;
       if (typeof raw === "string") {
         const direct = absoluteAudio(raw);
         if (direct) return direct;
       }
       if (typeof raw !== "string" || !raw.trim()) {
-        throw new Halt("EXAMPLE_AUDIO", `角色扮演句子 ${String(item.id)} 缺少示例音频`);
+        throw new Halt("AUDIO_RESOLVE", `角色扮演句子 ${String(item.id)} 缺少音频`);
       }
       const service = c.getWebUrlService ?? c.webUrlService;
       const source = typeof service?.getResUrl === "function" ? service.getResUrl(raw, 2) : void 0;
       if (typeof source?.subscribe !== "function") {
-        throw new Halt("EXAMPLE_AUDIO", "页面未提供示例音频解析服务，请关闭“角色扮演使用示例音频”后重试");
+        throw new Halt("AUDIO_RESOLVE", "页面未提供音频解析服务，请关闭“角色扮演使用音频”后重试");
       }
       let subscription;
       try {
@@ -1028,11 +1203,11 @@
         }), settings.timeoutMs, signal);
         const url = object(response).url;
         if (typeof url === "string" && url.trim()) return new URL(url, location.href).href;
-        throw new Halt("EXAMPLE_AUDIO", `角色扮演句子 ${String(item.id)} 的示例音频地址为空`);
+        throw new Halt("AUDIO_RESOLVE", `角色扮演句子 ${String(item.id)} 的音频地址为空`);
       } catch (error) {
         if (error instanceof Halt) throw error;
         const status = Number(object(error).status);
-        throw new Halt("EXAMPLE_AUDIO", `角色扮演示例音频解析失败${status ? `（HTTP ${status}）` : ""}，请检查网络或关闭示例音频模式`);
+        throw new Halt("AUDIO_RESOLVE", `角色扮演音频解析失败${status ? `（HTTP ${status}）` : ""}，请检查网络或关闭音频模式`);
       } finally {
         subscription?.unsubscribe();
       }
@@ -1390,8 +1565,12 @@
           <label for="units">当前练习</label><select id="units" aria-label="当前练习"></select>
           <div class="row"><label><input id="all" type="checkbox"> 处理本章节全部已加载练习块</label></div>
           <div class="row"><label>口语录音时长 <input id="seconds" type="number" min="3" max="180" step="1"> 秒</label></div>
-          <div class="row"><label><input id="exampleAudio" type="checkbox"> 角色扮演使用示例音频代替麦克风（不生成评分）</label></div>
-          <p class="hint">角色扮演默认把原题示例音频作为录音结果提交；关闭后使用真实麦克风。跟读和单词题遵循页面时长。答案缺失时暂停。仅处理日常练习。</p>
+          <div class="row"><label>角色扮演/跟读录音来源<select id="rolePlayMode">
+            <option value="original">原题音频 → Chivox 评测（生成评分）</option>
+            <option value="sample">原题音频直填（不评分）</option>
+            <option value="microphone">真实麦克风</option>
+          </select></label></div>
+          <p class="hint">有原题音频时默认灌入原站 Chivox，生成真实评分；缺少音频会暂停。MiMo TTS 接口已预留，尚未接入录音流程。跟读和单词题遵循页面时长。</p>
           <progress id="progress" class="progress" value="0" max="1"></progress><div class="hint" id="counts"></div>
           <div class="actions row"><button class="primary" id="start">开始</button><button id="pause">暂停</button><button id="stop">停止</button></div>
           <div id="pending" class="pending"></div>
@@ -1401,10 +1580,10 @@
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.1.4";
+      this.el("version").textContent = false ? "dev" : "0.2.0";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
-      this.input("exampleAudio").checked = this.settings.rolePlayExampleAudio;
+      this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
       this.el("collapse").addEventListener("click", () => {
         this.el("panel").classList.add("hidden");
         this.el("mini").classList.remove("hidden");
@@ -1420,11 +1599,12 @@
         }
         try {
           const raw = Number(this.input("seconds").value);
+          const mode = this.el("rolePlayMode").value;
           this.settings = {
             ...defaults,
             allLoaded: this.input("all").checked,
             recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds,
-            rolePlayExampleAudio: this.input("exampleAudio").checked
+            rolePlayAudioMode: ["original", "sample", "microphone"].includes(mode) ? mode : defaults.rolePlayAudioMode
           };
           this.input("seconds").value = String(this.settings.recordingSeconds);
           this.store.saveSettings(this.settings);
@@ -1543,7 +1723,7 @@
       const progress = this.el("progress");
       progress.max = Math.max(p.total, 1);
       progress.value = p.completed;
-      for (const id2 of ["units", "seconds", "all", "exampleAudio", "refresh", "reset"]) this.input(id2).disabled = busy;
+      for (const id2 of ["units", "seconds", "all", "rolePlayMode", "refresh", "reset"]) this.el(id2).disabled = busy;
       this.el("start").disabled = busy || !this.units.length;
       this.el("start").textContent = p.status === "paused" || p.status === "stopped" ? "继续" : "开始";
       this.el("pause").disabled = !busy;
@@ -1566,7 +1746,7 @@
       } catch {
       }
       return {
-        version: false ? "dev" : "0.1.4",
+        version: false ? "dev" : "0.2.0",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),
@@ -1609,10 +1789,11 @@
     settings() {
       try {
         const raw = JSON.parse(this.storage.getItem(prefix + "settings") || "{}");
+        const mode = ["original", "sample", "microphone"].includes(raw.rolePlayAudioMode) ? raw.rolePlayAudioMode : raw.rolePlayExampleAudio === false ? "microphone" : defaults.rolePlayAudioMode;
         return {
           allLoaded: raw.allLoaded === true,
           recordingSeconds: typeof raw.recordingSeconds === "number" && Number.isFinite(raw.recordingSeconds) ? Math.min(180, Math.max(3, raw.recordingSeconds)) : defaults.recordingSeconds,
-          rolePlayExampleAudio: typeof raw.rolePlayExampleAudio === "boolean" ? raw.rolePlayExampleAudio : defaults.rolePlayExampleAudio,
+          rolePlayAudioMode: mode,
           timeoutMs: defaults.timeoutMs,
           intervalMs: defaults.intervalMs
         };

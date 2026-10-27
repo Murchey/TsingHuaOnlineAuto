@@ -44,8 +44,12 @@ export class Panel {
           <label for="units">当前练习</label><select id="units" aria-label="当前练习"></select>
           <div class="row"><label><input id="all" type="checkbox"> 处理本章节全部已加载练习块</label></div>
           <div class="row"><label>口语录音时长 <input id="seconds" type="number" min="3" max="180" step="1"> 秒</label></div>
-          <div class="row"><label><input id="exampleAudio" type="checkbox"> 角色扮演使用示例音频代替麦克风（不生成评分）</label></div>
-          <p class="hint">角色扮演默认把原题示例音频作为录音结果提交；关闭后使用真实麦克风。跟读和单词题遵循页面时长。答案缺失时暂停。仅处理日常练习。</p>
+          <div class="row"><label>角色扮演/跟读录音来源<select id="rolePlayMode">
+            <option value="original">原题音频 → Chivox 评测（生成评分）</option>
+            <option value="sample">原题音频直填（不评分）</option>
+            <option value="microphone">真实麦克风</option>
+          </select></label></div>
+          <p class="hint">有原题音频时默认灌入原站 Chivox，生成真实评分；缺少音频会暂停。MiMo TTS 接口已预留，尚未接入录音流程。跟读和单词题遵循页面时长。</p>
           <progress id="progress" class="progress" value="0" max="1"></progress><div class="hint" id="counts"></div>
           <div class="actions row"><button class="primary" id="start">开始</button><button id="pause">暂停</button><button id="stop">停止</button></div>
           <div id="pending" class="pending"></div>
@@ -58,7 +62,7 @@ export class Panel {
     this.el('version').textContent = typeof __APP_VERSION__ === 'undefined' ? 'dev' : __APP_VERSION__;
     this.input('all').checked = this.settings.allLoaded;
     this.input('seconds').value = String(this.settings.recordingSeconds);
-    this.input('exampleAudio').checked = this.settings.rolePlayExampleAudio;
+    (this.el('rolePlayMode') as HTMLSelectElement).value = this.settings.rolePlayAudioMode;
     this.el('collapse').addEventListener('click', () => {
       this.el('panel').classList.add('hidden'); this.el('mini').classList.remove('hidden');
     });
@@ -70,9 +74,11 @@ export class Panel {
       if (!unit) { this.controller.report('NO_UNIT', '请打开教材或课程的日常练习页后重新检测', true); return; }
       try {
         const raw = Number(this.input('seconds').value);
+        const mode = (this.el('rolePlayMode') as HTMLSelectElement).value;
         this.settings = { ...defaults, allLoaded: this.input('all').checked,
           recordingSeconds: Number.isFinite(raw) ? Math.min(180, Math.max(3, raw)) : defaults.recordingSeconds,
-          rolePlayExampleAudio: this.input('exampleAudio').checked };
+          rolePlayAudioMode: ['original', 'sample', 'microphone'].includes(mode) ?
+            mode as Settings['rolePlayAudioMode'] : defaults.rolePlayAudioMode };
         this.input('seconds').value = String(this.settings.recordingSeconds);
         this.store.saveSettings(this.settings);
         void this.controller.start(unit, this.settings);
@@ -151,7 +157,7 @@ export class Panel {
     this.el('counts').textContent = `题目 ${p.completed}/${p.total} · 练习块 ${p.unitsDone}/${p.unitsTotal}${p.type ? ' · ' + p.type : ''}`;
     const progress = this.el('progress') as HTMLProgressElement;
     progress.max = Math.max(p.total, 1); progress.value = p.completed;
-    for (const id of ['units', 'seconds', 'all', 'exampleAudio', 'refresh', 'reset']) this.input(id).disabled = busy;
+    for (const id of ['units', 'seconds', 'all', 'rolePlayMode', 'refresh', 'reset']) (this.el(id) as HTMLInputElement | HTMLSelectElement).disabled = busy;
     (this.el('start') as HTMLButtonElement).disabled = busy || !this.units.length;
     this.el('start').textContent = p.status === 'paused' || p.status === 'stopped' ? '继续' : '开始';
     (this.el('pause') as HTMLButtonElement).disabled = !busy;

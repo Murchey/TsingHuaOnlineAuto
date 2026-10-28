@@ -68,6 +68,25 @@ export function legacyQuestion(exercise: unknown): Question {
     }
     q.type = 'legacy_11';
     q.extension = { legacyType: 11, targets, items };
+  } else if (type === 22) {
+    // Judge (true/false) grid: every statement picks one option column.
+    const items = arrayField(e, 'sentItems', 'sentenceItems', 'items').map(value => {
+      const item = object(value);
+      return { id: String(item.id ?? ''), text: richText(item.styleText ?? item.text ?? item.content),
+        answer: String(item.answer ?? item.optionId ?? '') };
+    });
+    const options = arrayField(e, 'options', 'choices').map(value => {
+      const option = object(value);
+      return { id: String(option.id ?? ''),
+        text: String(option.text ?? '') || richText(option.styleContent ?? option.content) ||
+          String(option.content ?? option.name ?? '') };
+    });
+    if (!items.length || items.some(item => !item.id) || !options.length || options.some(option => !option.id)) {
+      throw new Halt('DATA_SHAPE', '旧版判断题缺少句子或判断选项');
+    }
+    q.type = 'legacy_22';
+    q.answer = items.map(item => ({ idx: item.id, val: item.answer }));
+    q.extension = { legacyType: 22, items, options };
   } else if (type === 19) {
     q.type = 'fill_base';
     const blanks = Array.isArray(e.fillBlanks) ? e.fillBlanks.map(object) : [];
@@ -230,6 +249,11 @@ export function scriptFillAnswers(q: Question): { idx: string; answer: string }[
 }
 
 export function legacyValue(q: Question, record: unknown): unknown {
+  if (q.type === 'legacy_22') {
+    return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
+      idx, answer: String(object(value).id ?? ''),
+    }));
+  }
   if (q.type === 'legacy_11') {
     return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
       idx, answers: Array.isArray(object(value).choiceIds) ? (object(value).choiceIds as unknown[]).map(String) : [],

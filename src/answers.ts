@@ -51,6 +51,16 @@ export function taskFor(q: Question, record?: AnswerRecord, allowMissing = false
     }
     return { question: q, kind: 'choice', value: q.type === 'choice_multiple' ? values : values[0] };
   }
+  if (q.type === 'legacy_22') {
+    const items = object(q.extension).items;
+    if (!Array.isArray(items) || !items.length) throw new Halt('DATA_SHAPE', `判断题 ${q.id} 的句子缺失`);
+    const saved = Array.isArray(answer) ? answer.map(object) : [];
+    return { question: q, kind: 'fill', value: items.map(item => {
+      const idx = String(object(item).id);
+      const match = saved.find(entry => String(entry.idx) === idx);
+      return { idx, answer: match && typeof match.val === 'string' ? match.val : '' };
+    }) };
+  }
   if (q.type === 'legacy_11') {
     const targets = object(q.extension).targets;
     if (!Array.isArray(targets) || !targets.length) throw new Halt('DATA_SHAPE', `分类题 ${q.id} 的目标缺失`);
@@ -128,6 +138,8 @@ function audioId(value: unknown): string {
 export function canonical(q: Question, value: unknown): unknown {
   const v = q.type === 'choice_single' || q.type === 'judge_basic' ? value : parse(value);
   if (q.type === 'choice_multiple') return Array.isArray(v) ? [...v].sort() : v;
+  if (q.type === 'legacy_22') return Array.isArray(v) ? v.map(object).map(a => ({ idx: a.idx, answer: a.answer }))
+    .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
   if (q.type === 'legacy_11') return Array.isArray(v) ? v.map(object).map(group => ({ idx: group.idx,
     answers: Array.isArray(group.answers) ? (group.answers as unknown[]).map(String).sort() : [] }))
     .sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
@@ -190,6 +202,19 @@ export function hasCompleteResponse(q: Question, value: unknown): boolean {
     if (answeredIds.size !== answers.length || [...answeredIds].some(idx => !itemById.has(idx))) return false;
     const expected = items.filter(item => String(object(item).roleId ?? '') === roleId);
     return expected.length > 0 && expected.every(item => answeredIds.has(String(object(item).idx)));
+  }
+  if (q.type === 'legacy_22') {
+    const items = object(q.extension).items, options = object(q.extension).options;
+    const itemIds = new Set((Array.isArray(items) ? items : []).map(item => String(object(item).id)));
+    const optionIds = new Set((Array.isArray(options) ? options : []).map(option => String(object(option).id)));
+    if (!itemIds.size || !optionIds.size || !Array.isArray(v) || v.length !== itemIds.size) return false;
+    const answers = v.map(object), seen = new Set<string>();
+    return answers.every(entry => {
+      const idx = String(entry.idx);
+      if (!itemIds.has(idx) || seen.has(idx)) return false;
+      seen.add(idx);
+      return typeof entry.answer === 'string' && optionIds.has(entry.answer);
+    });
   }
   if (q.type === 'legacy_11') {
     const items = object(q.extension).items;

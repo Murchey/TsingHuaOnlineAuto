@@ -72,6 +72,12 @@ const exercise11 = () => ({ id: 'q-11', type: 11, contentString: 'Match each spo
   dragged: ['baseball', 'badminton', 'skiing', 'swimming'].map((text, index) => ({ id: 'i-' + index, content: text,
     styleContent: { paragraphs: [{ contentItems: [{ text }] }] } })) });
 
+const exercise22 = () => ({ id: 'q-22', type: 22, contentString: 'Listen and judge.',
+  sentItems: ['Statement one', 'Statement two'].map((text, index) => ({ id: 's-' + (index + 1),
+    styleText: { paragraphs: [{ contentItems: [{ text }] }] } })),
+  options: [{ id: 'opt-t', content: 'True', styleContent: { paragraphs: [{ contentItems: [{ text: 'True' }] }] } },
+    { id: 'opt-f', content: 'False', styleContent: { paragraphs: [{ contentItems: [{ text: 'False' }] }] } }] });
+
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); history.replaceState({}, '', path); });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -573,6 +579,40 @@ describe('legacy production route regression', () => {
     await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
     expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('a marathon'), expect.anything(), expect.anything());
     expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('词库'), expect.anything(), expect.anything());
+  });
+  it('plans legacy type 22 judge questions and validates option ids', () => {
+    const data = legacyData({ exercise: exercise22(), submitNum: 0 });
+    const question = data.questionVOList[0];
+    expect(question.type).toBe('legacy_22');
+    const plan = planTasks(data, { allowMissing: true })[0];
+    expect(plan.kind).toBe('fill');
+    expect((plan.value as any[]).map(v => v.idx)).toEqual(['s-1', 's-2']);
+    const complete = [{ idx: 's-1', answer: 'opt-t' }, { idx: 's-2', answer: 'opt-f' }];
+    expect(hasCompleteResponse(question, complete)).toBe(true);
+    expect(hasCompleteResponse(question, [{ idx: 's-1', answer: 'opt-x' }, { idx: 's-2', answer: 'opt-f' }])).toBe(false);
+    expect(hasCompleteResponse(question, [{ idx: 's-1', answer: 'opt-t' }])).toBe(false);
+  });
+  it('clicks the judge options returned by AI and confirms the record', async () => {
+    const exercise = exercise22();
+    document.body.innerHTML = '<app-course-task-stu><lib-judge-exercise-cs-study></lib-judge-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const changes = vi.fn();
+    const leaf: any = { status: 1, exercise, doRecord: { type: 22, answer: {} }, doRecordChange: { emit: changes },
+      selectOption(idx: string, option: string) {
+        this.doRecord.answer[idx] = { ...(this.doRecord.answer[idx] || {}), id: option, score: 0 }; changes(this.doRecord);
+      } };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Judge',
+      doRecord: leaf.doRecord, loadDoRecord() {} };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ fill: [{ idx: 's-1', answer: 'opt-t' }, { idx: 's-2', answer: 'opt-f' }] });
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(leaf.doRecord.answer['s-1'].id).toBe('opt-t');
+    expect(leaf.doRecord.answer['s-2'].id).toBe('opt-f');
+    expect(value).toEqual([{ idx: 's-1', answer: 'opt-t' }, { idx: 's-2', answer: 'opt-f' }]);
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());

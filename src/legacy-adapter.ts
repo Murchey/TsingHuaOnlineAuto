@@ -136,7 +136,20 @@ export class LegacyAdapter implements Adapter {
       });
     } else if (task.kind === 'fill') {
       const items = task.value as { idx: string; answer?: string; answers?: string[] }[];
-      if (task.question.type === 'legacy_11') {
+      if (task.question.type === 'legacy_22') {
+        if (typeof c.selectOption !== 'function') throw new Halt('QUESTION_DOM', '判断题控件已变化');
+        const pairs = items.map(value => {
+          const pair = object(value);
+          return { idx: String(pair.idx), answer: String(pair.answer ?? '') };
+        });
+        this.run(unit, () => {
+          const record = object(c.doRecord);
+          if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+          const answers = record.answer as Record<string, unknown>;
+          for (const pair of pairs) if (!answers[pair.idx]) answers[pair.idx] = { id: '', score: 0 };
+          for (const pair of pairs) c.selectOption(pair.idx, pair.answer);
+        });
+      } else if (task.question.type === 'legacy_11') {
         if (typeof c.drag !== 'function') throw new Halt('QUESTION_DOM', '分类拖拽控件已变化');
         const groups = items.map(value => {
           const group = object(value);
@@ -628,6 +641,10 @@ ${(q.stem || '').slice(0, 3000)}
     // component, so the leaf innerText alone can omit the options the answer must use.
     const pageRoot = (root.closest('app-course-task-stu') as HTMLElement | null) ?? root;
     const pageText = (pageRoot.innerText || pageRoot.textContent || root.innerText || root.textContent || '').slice(0, 8000);
+    const judge = Number(ext.legacyType) === 22 ? {
+      items: (Array.isArray(ext.items) ? ext.items : []).map(item => ({ id: String(object(item).id), text: String(object(item).text ?? '') })),
+      options: (Array.isArray(ext.options) ? ext.options : []).map(option => ({ id: String(object(option).id), text: String(object(option).text ?? '') })),
+    } : null;
     const catalog = Number(ext.legacyType) === 11 ? {
       targets: (Array.isArray(ext.targets) ? ext.targets : []).map(target => ({ id: String(object(target).id), text: String(object(target).text ?? '') })),
       items: (Array.isArray(ext.items) ? ext.items : []).map(item => ({ id: String(object(item).id), text: String(object(item).text ?? '') })),
@@ -645,11 +662,14 @@ ${pageText}
 空位: ${JSON.stringify(blanks)}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
 待分类项: ${JSON.stringify(catalog.items)}` : ''}
+${judge ? `判断题句子: ${JSON.stringify(judge.items)}
+判断选项: ${JSON.stringify(judge.options)}` : ''}
 听力转写: ${transcript || '（无）'}
 返回格式: ${schema}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填空的 answer 必须使用选项中的 ID。' : ''}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 19 ? '对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。' : ''}
 ${Number(ext.legacyType) === 11 ? '每个待分类项必须且只能放入一个目标，全部项目都要分配。' : ''}
+${Number(ext.legacyType) === 22 ? '判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段。' : ''}
 ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。' : ''}
 必须严格回答当前题目。`;
     const result = await answerWithAi(prompt, settings, signal);
@@ -685,6 +705,18 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
         throw new Halt('AI_ANSWER', 'AI 返回的选项不符合当前选择题');
       }
       return q.type === 'choice_multiple' ? selected : selected[0];
+    }
+    if (task.kind === 'fill' && Number(object(q.extension).legacyType) === 22) {
+      const ext = object(q.extension);
+      const optionIds = new Set((Array.isArray(ext.options) ? ext.options : []).map(option => String(object(option).id)));
+      const items = Array.isArray(task.value) ? task.value.map(object) : [];
+      const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
+      const byId = new Map(fill.map(entry => [String(entry.idx), String(entry.answer ?? '')]));
+      if (!optionIds.size || !items.length || items.some(item => {
+        const answer = byId.get(String(item.idx));
+        return !answer || !optionIds.has(answer);
+      })) throw new Halt('AI_ANSWER', 'AI 返回的判断题答案缺失或不是有效选项');
+      return items.map(item => ({ idx: String(item.idx), answer: byId.get(String(item.idx))! }));
     }
     if (task.kind === 'fill' && Number(object(q.extension).legacyType) === 11) {
       const ext = object(q.extension);

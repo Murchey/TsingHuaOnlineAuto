@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.8
+// @version      0.3.9
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -1127,7 +1127,7 @@
       });
       const items = arrayField(e, "dragged").map((value) => {
         const item = object(value);
-        return { id: String(item.id ?? ""), text: richText(item.styleContent) || String(item.content ?? "") };
+        return { id: String(item.id ?? ""), text: richText(item.styleContent) || richText(item.content) || String(item.content ?? "") };
       });
       if (!targets.length || targets.some((t) => !t.id) || !items.length || items.some((i) => !i.id)) {
         throw new Halt("DATA_SHAPE", "旧版分类拖拽题的目标或选项缺失");
@@ -1138,11 +1138,7 @@
       const targets = arrayField(e, "drag").map((value) => {
         const target = object(value);
         const answer = Array.isArray(target.answer) ? target.answer[0] : target.answer ?? target.choiceId;
-        return {
-          id: String(target.id ?? ""),
-          text: richText(target.styleContent) || String(target.content ?? ""),
-          answer: String(answer ?? "")
-        };
+        return { id: String(target.id ?? ""), text: richText(target.styleContent) || richText(target.content) || String(target.content ?? ""), answer: String(answer ?? "") };
       });
       const items = arrayField(e, "dragged").map((value) => {
         const item = object(value);
@@ -1558,7 +1554,11 @@
             const record = object(c.doRecord);
             if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
             for (const pair of pairs) {
-              const box = root.querySelector('[class~="' + pair.answer + '"]') ?? document.createElement("div");
+              const box = root.querySelector('[class~="' + pair.answer + '"], [id="drag-' + pair.answer + '"], [data-id="' + pair.answer + '"]') ?? (() => {
+                const fallback = document.createElement("div");
+                fallback.className = "drag-item " + pair.answer;
+                return fallback;
+              })();
               c.drag({
                 previousContainer: { id: pair.answer, data: {} },
                 container: { id: pair.idx, data: {} },
@@ -2141,7 +2141,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
 ${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
 ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个目标，全部项目都要分配。" : ""}
 ${Number(ext.legacyType) === 22 ? "判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。" : ""}
-${Number(ext.legacyType) === 10 ? "匹配题每个目标必须且只能选一个匹配项，每个选项只能用一次，全部目标都要分配。" : ""}
+${Number(ext.legacyType) === 10 ? "匹配题每个目标必须且只能选一个匹配项，每个选项最多用一次；若选项多于目标，可以有不使用的选项。answer 必须是“匹配选项”里的 id 字段，不能返回 a/b/c、描述文本或序号。" : ""}
 ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。" : ""}
 必须严格回答当前题目。`;
       let result;
@@ -2164,6 +2164,26 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
 上一次返回不符合要求：${JSON.stringify(result).slice(0, 800)}
 只能使用这些选项 id：${JSON.stringify(allowed)}
 请重新返回 {"fill":[{"idx":"句子ID","answer":"选项ID"}]}。`;
+          const retry = aiImages.images.length ? await answerWithAi(retryPrompt, settings, signal, aiImages.images) : await answerWithAi(retryPrompt, settings, signal);
+          return { ...task, value: this.validateAiValue(task, retry) };
+        }
+        if (Number(ext.legacyType) === 10 && error instanceof Halt && error.code === "AI_ANSWER") {
+          const allowed = {
+            targets: (Array.isArray(ext.targets) ? ext.targets : []).map((target) => {
+              const entry = object(target);
+              return { id: String(entry.id), text: String(entry.text ?? "") };
+            }),
+            items: (Array.isArray(ext.items) ? ext.items : []).map((item) => {
+              const entry = object(item);
+              return { id: String(entry.id), text: String(entry.text ?? "") };
+            })
+          };
+          const retryPrompt = `${prompt}
+
+上一次返回不符合要求：${JSON.stringify(result).slice(0, 1200)}
+匹配题的 answer 必须是“匹配选项”的 id 字段，不能返回 a/b/c、描述文本或序号。
+目标与选项：${JSON.stringify(allowed)}
+请重新返回 {"fill":[{"idx":"目标ID","answer":"选项ID"}]}。`;
           const retry = aiImages.images.length ? await answerWithAi(retryPrompt, settings, signal, aiImages.images) : await answerWithAi(retryPrompt, settings, signal);
           return { ...task, value: this.validateAiValue(task, retry) };
         }
@@ -2286,18 +2306,71 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       }
       if (task.kind === "fill" && Number(object(q.extension).legacyType) === 10) {
         const ext = object(q.extension);
-        const itemIds = new Set((Array.isArray(ext.items) ? ext.items : []).map((item) => String(object(item).id)));
+        const items = (Array.isArray(ext.items) ? ext.items : []).map(object);
+        const itemIds = new Set(items.map((item) => String(item.id)));
         const targets = Array.isArray(task.value) ? task.value.map(object) : [];
-        const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
-        const byId = new Map(fill.map((entry) => [String(entry.idx), String(entry.answer ?? "")]));
+        const toRows = (raw2) => {
+          if (Array.isArray(raw2)) return raw2.map((entry) => {
+            if (!entry || typeof entry !== "object") return { answer: entry };
+            const row = object(entry);
+            const answer = row.answer ?? row.choiceId ?? row.item ?? row.itemId ?? row.match ?? row.value ?? (Array.isArray(row.answers) ? row.answers[0] : void 0) ?? (Array.isArray(row.choiceIds) ? row.choiceIds[0] : void 0);
+            return { idx: row.idx ?? row.target ?? row.targetId ?? row.questionId ?? row.id, answer };
+          });
+          if (raw2 && typeof raw2 === "object") return Object.entries(object(raw2)).map(([idx, answer]) => ({ idx, answer }));
+          return [];
+        };
+        const raw = [result.fill, result.matching, result.matches, result.pairs, result.answers, result.answer].find((value3) => Array.isArray(value3) || !!value3 && typeof value3 === "object");
+        const rows = toRows(raw);
+        const byId = new Map(rows.map((row) => [String(row.idx ?? ""), row.answer]));
+        const normalize = (value3) => typeof value3 === "string" ? value3.trim().toLowerCase().replace(/^\(?([a-z])\)?[.):]?\s+/, "").replace(/[.。!！,，;；:：]+$/g, "").replace(/\s+/g, " ") : "";
+        const label = (value3) => {
+          const text2 = typeof value3 === "string" ? value3.trim() : "";
+          return /^\(?([a-z])\)?[.):]?(?:\s|$)/i.exec(text2)?.[1]?.toLowerCase() ?? "";
+        };
+        const itemFor = (value3) => {
+          if (value3 == null) return void 0;
+          if (typeof value3 === "object") {
+            const entry = object(value3);
+            for (const key2 of ["id", "choiceId", "itemId", "value", "answer"]) {
+              const hit = itemFor(entry[key2]);
+              if (hit) return hit;
+            }
+            return void 0;
+          }
+          const text2 = String(value3).trim();
+          if (!text2) return void 0;
+          if (itemIds.has(text2)) return text2;
+          const normalized = normalize(text2);
+          const exact = items.find((item) => normalize(item.text) === normalized);
+          if (exact) return String(exact.id);
+          const textLabel = label(text2);
+          if (textLabel) {
+            const byLabel = items.find((item) => label(item.text) === textLabel);
+            if (byLabel) return String(byLabel.id);
+          }
+          if (/^\d+$/.test(text2)) {
+            const index = Number(text2) - 1;
+            if (index >= 0 && index < items.length) return String(items[index].id);
+          }
+          const contained = items.filter((item) => {
+            const hay = normalize(item.text);
+            return hay.length > 8 && normalized.length > 8 && (hay.includes(normalized) || normalized.includes(hay));
+          });
+          return contained.length === 1 ? String(contained[0].id) : void 0;
+        };
+        if (!items.length || !targets.length) throw new Halt("AI_ANSWER", "匹配题目标或选项为空");
         const seen = /* @__PURE__ */ new Set();
-        const value2 = targets.map((target) => {
-          const idx = String(target.idx), answer = byId.get(idx) ?? "";
-          if (!itemIds.has(answer) || seen.has(answer)) throw new Halt("AI_ANSWER", `AI 返回的匹配项缺失、重复或不属于本题（目标 ${idx}）`);
+        const value2 = targets.map((target, index) => {
+          const idx = String(target.idx);
+          const rawAnswer = byId.get(idx) ?? (rows.length === targets.length ? rows[index]?.answer : void 0);
+          const answer = itemFor(rawAnswer);
+          if (!answer || seen.has(answer)) throw new Halt(
+            "AI_ANSWER",
+            `AI 返回的匹配项缺失、重复或不属于本题（目标 ${idx}，返回值 ${JSON.stringify(rawAnswer ?? "").slice(0, 120)}）`
+          );
           seen.add(answer);
           return { idx, answer };
         });
-        if (seen.size !== itemIds.size) throw new Halt("AI_ANSWER", "AI 返回的匹配没有覆盖全部选项");
         return value2;
       }
       if (task.kind === "fill" && Number(object(q.extension).legacyType) === 22) {
@@ -2950,7 +3023,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.8";
+      this.el("version").textContent = false ? "dev" : "0.3.9";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3160,7 +3233,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.8",
+        version: false ? "dev" : "0.3.9",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

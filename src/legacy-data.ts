@@ -66,7 +66,8 @@ export function legacyQuestion(exercise: unknown): Question {
     });
     const items = arrayField(e, 'dragged').map(value => {
       const item = object(value);
-      return { id: String(item.id ?? ''), text: richText(item.styleContent) || String(item.content ?? '') };
+      return { id: String(item.id ?? ''), text: richText(item.styleContent) || richText(item.content) ||
+        String(item.content ?? '') };
     });
     if (!targets.length || targets.some(t => !t.id) || !items.length || items.some(i => !i.id)) {
       throw new Halt('DATA_SHAPE', '旧版分类拖拽题的目标或选项缺失');
@@ -78,8 +79,8 @@ export function legacyQuestion(exercise: unknown): Question {
     const targets = arrayField(e, 'drag').map(value => {
       const target = object(value);
       const answer = Array.isArray(target.answer) ? target.answer[0] : (target.answer ?? target.choiceId);
-      return { id: String(target.id ?? ''), text: richText(target.styleContent) || String(target.content ?? ''),
-        answer: String(answer ?? '') };
+      return { id: String(target.id ?? ''), text: richText(target.styleContent) || richText(target.content) ||
+        String(target.content ?? ''), answer: String(answer ?? '') };
     });
     const items = arrayField(e, 'dragged').map(value => {
       const item = object(value);

@@ -212,14 +212,26 @@ export class LegacyAdapter implements Adapter {
             if (!answers[idx] || typeof answers[idx] !== 'object') answers[idx] = { id: idx, score: 0, content: '' };
           }
         });
-        const fields = items.map(item => {
-          const matches = [...root.querySelectorAll<HTMLElement>('[contenteditable="true"]')].filter(e => e.id === `a-${item.idx}`);
-          if (matches.length !== 1) throw new Halt('QUESTION_DOM', `填空 ${item.idx} 未找到唯一输入框`);
-          return { item, field: matches[0] };
+        const allFields = [...root.querySelectorAll<HTMLElement>('[contenteditable="true"]')];
+        const fields = items.map((item, index) => {
+          const matches = allFields.filter(e => e.id === `a-${item.idx}`);
+          if (matches.length === 1) return { item, field: matches[0] };
+          // Some legacy pages render a field id that differs from fillBlanks by one
+          // character. The rendered order still follows the blank order; use it and alias
+          // the value back to the expected record id below.
+          if (allFields.length === items.length) return { item, field: allFields[index] };
+          throw new Halt('QUESTION_DOM', `填空 ${item.idx} 未找到唯一输入框`);
         });
         for (const { item, field } of fields) {
           check(signal); field.focus(); field.innerText = item.answer ?? '';
           field.dispatchEvent(new Event('input', { bubbles: true })); field.blur();
+          const fieldId = field.id.replace(/^a-/, '');
+          if (fieldId && fieldId !== item.idx) {
+            const record = object(c.doRecord);
+            if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+            const answers = record.answer as Record<string, unknown>;
+            answers[item.idx] = { ...object(answers[fieldId]), id: item.idx, content: item.answer ?? '' };
+          }
         }
       }
     } else if (task.kind === 'writing') {

@@ -123,7 +123,7 @@
 - 图片下载后按 PNG/JPEG/GIF/WebP 字节头识别 MIME，转 base64；最多随请求发送 4 张，单张上限 8 MB。请求格式与 MiMo 官方文档一致：`image_url: { url: "data:<mime>;base64,..." }`。
 - 听力+图片：先使用题目 `audioScript` 或 ASR 转写，再把转写、整页文本、选项/空位和图片一起交给多模态模型；提示词要求以图片中的文字和页面文本为准。
 - 图片解析或下载失败时提示模型“图片读取失败，只依据文本作答”，不暂停练习；若模型不支持图片并返回 HTTP 400/413/415/422，自动重试一次纯文本请求。
-- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 127 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
+- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 128 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
 - **待真实验收：** 在正式脚本管理器中用已配置的 MiMo 视觉模型（`mimo-v2.6-flash`/pro）对真实看图写话和听力+图片题各提交一次，确认模型实际读取了图片而非仅凭文本猜测。
 
 
@@ -179,3 +179,14 @@
 - 媒体预算：`fetchMedia` 使用 600 秒独立超时；超过 200 MB 抛 `MEDIA_TOO_LARGE`，视频超过 20 分钟抛 `VIDEO_TOO_LONG`，均提示改手动作答；超时映射为 `MEDIA_TIMEOUT`。
 - 进度：控制器把 `adapter.onProgress` 绑定到面板 message；视频依次显示下载、已下载大小/处理音轨、第 i/n 段转写；分块间让出主线程；`videoJobs` 对共用视频的并发任务去重。
 - 自动验证：新增 OfflineAudioContext 构造参数/16 kHz 断言、32 KB Base64 一致性、媒体超时提示、视频进度消息等用例；`npm run check` 共 127 项通过。
+
+
+## 0.4.4 Unit 2 Clothing Goal 1 图片题与填空 id 修复
+
+- 真实页面：Unit 2 Clothing > Goal 1 > Vocabulary A（page `6a917a118334d27c2dc344a4`），type 3，17 个空位；图片 `66dbf1873c9484188ca5a533`。
+- 站点数据不一致：`fillBlanks` group 16 的 id 为 `9becedc3-67c8-f378-ee0e-79102a0e5230`，但 `exercise.content` type 2 项、DOM 输入框和 `exercise/submit` 使用 `...f377...`。旧逻辑提交返回 501“作答记录与习题不匹配”，belt 空位丢失。
+- 正确映射（服务端 17/17 全部 score=2，总分 34）：T-shirt、jeans、socks、sneakers、hat、coat、handbag、gloves、blouse、skirt、suit、shoes、shirt、tie、jacket、belt、pants。
+- 旧视觉映射在 6/7/8/11/13/14/15 共 7 个空位错误，只得 20/34；修复后 34/34，增加 14 分。用户之前 Goal 分数 58，理论上可到 72（达到 70 门槛）。
+- 修复：`contentBlankIds` 按 group 使用 content id；type 19 也按 group 对齐；该题加入已验证 17 答案；`fill()` 精确 id 失败时按顺序回退并别名到期望记录 id。
+- 自动验证：新增“content id 优先于 stale fillBlanks id + 已知图片答案”用例；`npm run check` 共 128 项通过。
+- **待真实验收：** 更新 0.4.4 后重做 Goal 1，确认 Vocabulary A 34/34 且 Goal 总分达到 70 以上；若最后 Conversation 填空仍低分，再单独检查该 task 的答案。

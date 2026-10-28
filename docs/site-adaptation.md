@@ -38,6 +38,8 @@ type 8 实际为 `LIB-ORAL-BRIEF-EXERCISE-CS-STUDY` 口语简答，不是 textar
 - 站点重置某关答案但保留 `submitNum`（服务器上没有任何完整作答）时，已校验 checkpoint 会自动清理并重新作答；服务器记录完全消失仍以 `RECORD_CHANGED` 暂停。
 - MiMo ASR 使用 `/chat/completions`，user content 仅含 `input_audio`；OpenAI 兼容 ASR 仍走 multipart `/audio/transcriptions`。
 
+0.4.4 修复填空 id 不一致：Unit 2 Clothing Goal 1 Vocabulary A 的 `fillBlanks` 中 group 16 为 `9becedc3-67c8-f378-ee0e-79102a0e5230`，但 `exercise.content` 的 type 2 项、DOM 输入框和 `exercise/submit` 实际使用 `...f377...`。旧逻辑按 `fillBlanks` 生成 answer/stem，提交返回 501“作答记录与习题不匹配”，belt 空位无法得分。`legacy-data.ts` 新增 `contentBlankIds`，按 group 取 content 项 id；type 19 同样按 group 对齐 dialogue 空位。图片题另保留 17 个已验证答案（T-shirt … pants），避免视觉歧义导致 6/7/8/11/13/14/15 错位。`fill()` 在精确 id 不存在时按渲染顺序取第 n 个 contenteditable，并把值别名到期望记录 id。
+
 0.4.3 优化视频处理：Chivox 已占用多个硬件 AudioContext，继续 `new AudioContext()` 可能抛错；改用 `new OfflineAudioContext(1, 1, 16000)` 的 `decodeAudioData`，浏览器原生重采样到 16 kHz，`videoToPcm` 只做单声道下混，不再做逐样本插值。Base64 编码改为每 32 KB `String.fromCharCode.apply`，5.6 MB 分块不再长时间占用主线程。媒体下载使用独立 `MEDIA_TIMEOUT_MS=600000`，并限制 200 MB 与 20 分钟，超限抛出 `MEDIA_TOO_LARGE`/`VIDEO_TOO_LONG` 明确提示手动作答。`LegacyAdapter.onProgress` 由控制器绑定面板消息，依次显示“正在下载视频题目资源…”“视频已下载（N MB），正在处理音轨…”“正在转写视频音频第 i/n 段…”；分块间 `yieldMainThread()`，组合题共用视频通过 `videoJobs` 并发去重。
 
 0.4.2 修复看图填词/标注题：旧版 type 3 的 `fillBlanks[].group` 是图片中的编号，`content.paragraphs` 只有空位而没有句子文本。`legacy-data.ts` 现在保留 `extension.blanks[].group`；`aiTask` 把 `number` 写入空位 JSON，并识别“仅有空位、无周围句子”的图片标注题（`imageOnlyBlanks`）。`cropImage` 自动把原图裁成左侧/中部/右侧 3 张重叠放大图（3x），让编号线端点更清晰；提示词要求模型先读取图片词库、为每个编号写 `observations`，再返回 `words` 和 `fill`；`validateAiValue` 用 `result.words` 校验答案必须来自词库、重复次数不能超过词库本身，失败自动重试一次。`answerWithAi` 对 MiMo 设置 `thinking: {type:"disabled"}` 与 `max_completion_tokens: 4000`，避免深度思考耗尽预算导致 content 为空。

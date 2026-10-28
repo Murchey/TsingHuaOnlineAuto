@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.4.3
+// @version      0.4.4
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -1236,6 +1236,43 @@
   }
 
   // src/legacy-data.ts
+  var KNOWN_ANSWERS = {
+    "decf12da-a5d6-c5db-013d-5467fbf2ebb4": {
+      "468ca1f4-9470-bce0-3833-3fb426231e25": "T-shirt",
+      "be724d76-69ac-de6e-88a4-bacf00bea4d9": "jeans",
+      "ec1233b5-e625-820d-4cf8-f80a7a2faac1": "socks",
+      "3492f7bb-964f-85cc-fbff-f01919058e86": "sneakers",
+      "b6a1af13-52d5-588d-8975-29e411767a1a": "hat",
+      "65c7b432-4420-8b9e-3e1e-5604458cca92": "coat",
+      "71eb1cf7-9760-4147-3e89-469cc1346134": "handbag",
+      "9515cd65-bebc-3079-86c8-358191ed1d5f": "gloves",
+      "988f6b27-de17-9d73-904a-7b03b05800b7": "blouse",
+      "87af2927-112b-db35-fd27-243c1ee55f5b": "skirt",
+      "408d4e35-d6ec-502e-5057-736b17b62957": "suit",
+      "d954daf1-93f9-459b-fa73-39f9c3952a09": "shoes",
+      "8c2f7a35-562f-37db-304c-83913cc738b4": "shirt",
+      "f695ea26-97ee-cf59-557c-4e734327e4c9": "tie",
+      "0730ad45-1e7d-e573-4689-580a24233f71": "jacket",
+      "9becedc3-67c8-f377-ee0e-79102a0e5230": "belt",
+      "9becedc3-67c8-f378-ee0e-79102a0e5230": "belt",
+      "6af0b68c-b060-1b10-a9e1-a6290cd471f7": "pants"
+    }
+  };
+  function contentBlankIds(e) {
+    const out = /* @__PURE__ */ new Map();
+    const content = object(e.content);
+    const paragraphs = Array.isArray(content.paragraphs) ? content.paragraphs : [];
+    for (const raw of paragraphs) {
+      const items = Array.isArray(object(raw).contentItems) ? object(raw).contentItems : [];
+      for (const part of items) {
+        const item = object(part);
+        if (Number(item.type) !== 2 || typeof item.id !== "string" || !item.id) continue;
+        const group = Number(item.group);
+        if (Number.isFinite(group) && !out.has(group)) out.set(group, item.id);
+      }
+    }
+    return out;
+  }
   function legacyQuestion(exercise) {
     const e = normalizeExercise(exercise), type = Number(e.type);
     const q = { id: String(e.id || ""), type: `legacy_${type}`, instruction: String(e.contentString || "") };
@@ -1268,13 +1305,24 @@
       q.type = "fill_base";
       const blanks = Array.isArray(e.fillBlanks) ? e.fillBlanks.map(object) : [];
       if (blanks.some((b) => typeof b.id !== "string" || !/^[\w-]+$/.test(b.id))) throw new Halt("DATA_SHAPE", "旧版填空标识格式异常");
-      q.stem = blanks.map((b) => `<span class="zty-exercise-item-fill-blank" id="${b.id}"></span>`).join("");
-      q.answer = blanks.map((b) => ({ idx: b.id, val: b.answer }));
+      const contentIds = contentBlankIds(e);
+      const blankId = (b) => contentIds.get(Number(b.group)) ?? String(b.id);
+      q.stem = blanks.map((b) => `<span class="zty-exercise-item-fill-blank" id="${blankId(b)}"></span>`).join("");
+      q.answer = blanks.map((b) => ({ idx: blankId(b), val: b.answer }));
       q.extension = {
         legacyType: type,
         options: Array.isArray(e.dragged) ? e.dragged.map((d) => object(d).id) : [],
-        blanks: blanks.map((b) => ({ idx: b.id, group: Number.isFinite(Number(b.group)) ? Number(b.group) : void 0 }))
+        blanks: blanks.map((b) => ({ idx: blankId(b), group: Number.isFinite(Number(b.group)) ? Number(b.group) : void 0 }))
       };
+      const known = KNOWN_ANSWERS[String(e.id)];
+      if (known && Array.isArray(q.answer)) {
+        q.answer = q.answer.map((entry) => {
+          const item = object(entry);
+          const value = known[String(item.idx)];
+          return value ? { ...item, val: value } : item;
+        });
+        q.extension = { ...object(q.extension), knownAnswers: true };
+      }
       if (type === 24) {
         const ids = q.extension.options;
         if (new Set(ids).size !== ids.length || blanks.some((b) => typeof b.answer !== "string" || !ids.includes(b.answer))) {
@@ -1360,11 +1408,13 @@
         throw new Halt("DATA_SHAPE", "旧版对话填空标识格式异常");
       }
       const parsed = dialogueData(e);
-      q.stem = blanks.map((b) => '<span class="zty-exercise-item-fill-blank" id="' + String(b.id) + '"></span>').join("");
+      const byGroup = new Map(parsed.blanks.filter((b) => b.group != null).map((b) => [Number(b.group), b.idx]));
+      const blankId = (b) => byGroup.get(Number(b.group)) ?? String(b.id);
+      q.stem = blanks.map((b) => '<span class="zty-exercise-item-fill-blank" id="' + blankId(b) + '"></span>').join("");
       q.answer = blanks.map((b) => {
         const plain = typeof b.answer === "string" ? b.answer : "";
         const standard = typeof b.standardAnswer === "string" ? b.standardAnswer : "";
-        return { idx: b.id, val: plain || standard };
+        return { idx: blankId(b), val: plain || standard };
       });
       q.extension = {
         legacyType: 19,
@@ -1829,10 +1879,12 @@
               if (!answers[idx] || typeof answers[idx] !== "object") answers[idx] = { id: idx, score: 0, content: "" };
             }
           });
-          const fields = items.map((item) => {
-            const matches = [...root.querySelectorAll('[contenteditable="true"]')].filter((e) => e.id === `a-${item.idx}`);
-            if (matches.length !== 1) throw new Halt("QUESTION_DOM", `填空 ${item.idx} 未找到唯一输入框`);
-            return { item, field: matches[0] };
+          const allFields = [...root.querySelectorAll('[contenteditable="true"]')];
+          const fields = items.map((item, index) => {
+            const matches = allFields.filter((e) => e.id === `a-${item.idx}`);
+            if (matches.length === 1) return { item, field: matches[0] };
+            if (allFields.length === items.length) return { item, field: allFields[index] };
+            throw new Halt("QUESTION_DOM", `填空 ${item.idx} 未找到唯一输入框`);
           });
           for (const { item, field } of fields) {
             check(signal);
@@ -1840,6 +1892,13 @@
             field.innerText = item.answer ?? "";
             field.dispatchEvent(new Event("input", { bubbles: true }));
             field.blur();
+            const fieldId = field.id.replace(/^a-/, "");
+            if (fieldId && fieldId !== item.idx) {
+              const record = object(c.doRecord);
+              if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+              const answers = record.answer;
+              answers[item.idx] = { ...object(answers[fieldId]), id: item.idx, content: item.answer ?? "" };
+            }
           }
         }
       } else if (task.kind === "writing") {
@@ -3414,7 +3473,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.4.3";
+      this.el("version").textContent = false ? "dev" : "0.4.4";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3624,7 +3683,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.4.3",
+        version: false ? "dev" : "0.4.4",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

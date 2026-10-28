@@ -452,6 +452,25 @@ describe('legacy production route regression', () => {
     expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('Write about the picture'), settings,
       expect.anything(), [{ mime: 'image/png', data: 'DATAPNG' }]);
   });
+  it('uses rendered content ids instead of stale fillBlanks ids for the image key', () => {
+    const exercise: any = { id: 'decf12da-a5d6-c5db-013d-5467fbf2ebb4', type: 3,
+      contentString: 'Label the pictures below with the words from the box.',
+      fillBlanks: [{ id: '468ca1f4-9470-bce0-3833-3fb426231e25', group: 1, answer: '' },
+        { id: '9becedc3-67c8-f378-ee0e-79102a0e5230', group: 16, answer: '' }],
+      content: { paragraphs: [
+        { contentItems: [{ type: 2, id: '468ca1f4-9470-bce0-3833-3fb426231e25', group: 1 }] },
+        { contentItems: [{ type: 2, id: '9becedc3-67c8-f377-ee0e-79102a0e5230', group: 16 }] },
+      ] } };
+    const data = legacyData({ exercise, submitNum: 0 });
+    const q = data.questionVOList[0];
+    expect((q.answer as any[]).map(entry => entry.idx)).toEqual([
+      '468ca1f4-9470-bce0-3833-3fb426231e25', '9becedc3-67c8-f377-ee0e-79102a0e5230']);
+    expect((q.answer as any[]).map(entry => entry.val)).toEqual(['T-shirt', 'belt']);
+    expect((q.extension as any).blanks.map((entry: any) => entry.idx)).toEqual([
+      '468ca1f4-9470-bce0-3833-3fb426231e25', '9becedc3-67c8-f377-ee0e-79102a0e5230']);
+    expect(q.stem).toContain('9becedc3-67c8-f377-ee0e-79102a0e5230');
+    expect(q.stem).not.toContain('9becedc3-67c8-f378-ee0e-79102a0e5230');
+  });
   it('uses the image word box and blank numbers for picture labelling', async () => {
     document.body.innerHTML = '<app-course-task-stu><div class="mould">' +
       '<lib-exercise-res-show><div class="show-img"><img src="https://cdn.example/label.png"></div></lib-exercise-res-show>' +

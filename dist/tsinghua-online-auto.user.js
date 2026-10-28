@@ -1936,12 +1936,24 @@ ${(q.stem || "").slice(0, 3e3)}
         return content == null;
       });
     }
+    hasTaskAnswers(task) {
+      const value = task.value;
+      if (task.kind === "choice") return Array.isArray(value) ? value.length > 0 : typeof value === "string" && !!value.trim();
+      if (task.kind === "fill") {
+        const items = Array.isArray(value) ? value.map(object) : [];
+        if (!items.length) return false;
+        return items.every((item) => Array.isArray(item.answers) ? item.answers.length > 0 : typeof item.answer === "string" && !!item.answer.trim());
+      }
+      if (task.kind === "writing") return typeof object(value).answer === "string" && !!String(object(value).answer).trim();
+      return false;
+    }
     async aiTask(task, root, c, settings, signal) {
       const ext = object(task.question.extension);
       if (task.kind === "fill" && Number(ext.legacyType) === 19) {
         const scripted = scriptFillAnswers(task.question);
         if (scripted) return { ...task, value: scripted };
       }
+      if (task.kind !== "recording" && this.hasTaskAnswers(task)) return task;
       if (!settings.aiAnswers || task.kind === "recording") return task;
       if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "已启用 AI 答题，但未填写 AI API Key");
       const q = task.question;

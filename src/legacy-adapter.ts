@@ -613,6 +613,19 @@ ${(q.stem || '').slice(0, 3000)}
       return content == null;
     });
   }
+  private hasTaskAnswers(task: Task): boolean {
+    const value = task.value;
+    if (task.kind === 'choice') return Array.isArray(value) ? value.length > 0 :
+      typeof value === 'string' && !!value.trim();
+    if (task.kind === 'fill') {
+      const items = Array.isArray(value) ? value.map(object) : [];
+      if (!items.length) return false;
+      return items.every(item => Array.isArray(item.answers) ? item.answers.length > 0 :
+        typeof item.answer === 'string' && !!item.answer.trim());
+    }
+    if (task.kind === 'writing') return typeof object(value).answer === 'string' && !!String(object(value).answer).trim();
+    return false;
+  }
   private async aiTask(task: Task, root: HTMLElement, c: LegacyComponent, settings: Settings,
     signal: AbortSignal): Promise<Task> {
     const ext = object(task.question.extension);
@@ -623,6 +636,9 @@ ${(q.stem || '').slice(0, 3000)}
       const scripted = scriptFillAnswers(task.question);
       if (scripted) return { ...task, value: scripted };
     }
+    // Never let a generative answer replace an answer the exercise already carries
+    // (for example judge optionId): AI is only a fallback for missing data.
+    if (task.kind !== 'recording' && this.hasTaskAnswers(task)) return task;
     if (!settings.aiAnswers || task.kind === 'recording') return task;
     if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '已启用 AI 答题，但未填写 AI API Key');
     const q = task.question;

@@ -559,7 +559,7 @@ describe('legacy production route regression', () => {
   });
   it('gives the AI the whole page so word boxes outside the child question are included', async () => {
     const exercise: any = { id: 'q-15', type: 15, audioScript: '<p>Speaker A: I like running.</p>', exerciseList: [
-      { id: 'c-1', type: 5, fillBlanks: [{ id: 'b-1', answer: 'a marathon' }] }] };
+      { id: 'c-1', type: 5, fillBlanks: [{ id: 'b-1', answer: '' }] }] };
     document.body.innerHTML = '<app-course-task-stu><div class="word-box">golf volleyball a marathon the soccer team</div>' +
       '<lib-fill-blank-exercise-cs-study><span contenteditable="true" id="a-b-1"></span></lib-fill-blank-exercise-cs-study>' +
       '<button>Submit</button></app-course-task-stu>';
@@ -612,6 +612,29 @@ describe('legacy production route regression', () => {
     const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
     expect(leaf.doRecord.answer['s-1'].id).toBe('opt-t');
     expect(leaf.doRecord.answer['s-2'].id).toBe('opt-f');
+    expect(value).toEqual([{ idx: 's-1', answer: 'opt-t' }, { idx: 's-2', answer: 'opt-f' }]);
+  });
+  it('uses the judge optionId carried by the exercise instead of asking AI', async () => {
+    const exercise: any = exercise22();
+    exercise.sentItems[0].optionId = 'opt-t';
+    exercise.sentItems[1].optionId = 'opt-f';
+    document.body.innerHTML = '<app-course-task-stu><lib-judge-exercise-cs-study></lib-judge-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const changes = vi.fn();
+    const leaf: any = { status: 1, exercise, doRecord: { type: 22, answer: {} }, doRecordChange: { emit: changes },
+      selectOption(idx: string, option: string) {
+        this.doRecord.answer[idx] = { id: option, score: 0 }; changes(this.doRecord);
+      } };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Judge',
+      doRecord: leaf.doRecord, loadDoRecord() {} };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockClear();
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(answerWithAi).not.toHaveBeenCalled();
     expect(value).toEqual([{ idx: 's-1', answer: 'opt-t' }, { idx: 's-2', answer: 'opt-f' }]);
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {

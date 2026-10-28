@@ -38,7 +38,8 @@ export function legacyQuestion(exercise: unknown): Question {
     q.stem = blanks.map(b => `<span class="zty-exercise-item-fill-blank" id="${b.id}"></span>`).join('');
     q.answer = blanks.map(b => ({ idx: b.id, val: b.answer }));
     // Keep all option identities in the fingerprint, including drag-and-drop assignments.
-    q.extension = { legacyType: type, options: Array.isArray(e.dragged) ? e.dragged.map(d => object(d).id) : [] };
+    q.extension = { legacyType: type, options: Array.isArray(e.dragged) ? e.dragged.map(d => object(d).id) : [],
+      blanks: blanks.map(b => ({ idx: b.id, group: Number.isFinite(Number(b.group)) ? Number(b.group) : undefined })) };
     if (type === 24) {
       const ids = (q.extension as { options: unknown[] }).options;
       if (new Set(ids).size !== ids.length || blanks.some(b => typeof b.answer !== 'string' || !ids.includes(b.answer))) {
@@ -244,7 +245,8 @@ export function richText(value: unknown): string {
   return chunks.join(' ').trim();
 }
 
-interface DialogueData { items: { role: string; text: string }[]; blanks: { idx: string; before: string; after: string }[] }
+interface DialogueData { items: { role: string; text: string }[];
+  blanks: { idx: string; group?: number; before: string; after: string }[] }
 
 // Type 19 interleaves dialogue text with blank placeholders. Keep the nearest text
 // neighbours so the official audio script can later restore each missing segment.
@@ -263,8 +265,8 @@ function dialogueData(e: Record<string, unknown>): DialogueData {
           const idx = typeof item.id === 'string' ? item.id : '';
           if (!idx) continue;
           const before = object(contentItems[index - 1]).text, after = object(contentItems[index + 1]).text;
-          blanks.push({ idx, before: typeof before === 'string' ? before : '',
-            after: typeof after === 'string' ? after : '' });
+          blanks.push({ idx, group: Number.isFinite(Number(item.group)) ? Number(item.group) : undefined,
+            before: typeof before === 'string' ? before : '', after: typeof after === 'string' ? after : '' });
           parts.push('[[' + idx + ']]');
         } else if (typeof item.text === 'string') parts.push(item.text);
       }

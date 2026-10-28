@@ -59,6 +59,19 @@ it('uses MiMo chat-completions ASR with an input_audio part', async () => {
   expect(body.model).toBe('mimo-v2.5-asr');
   expect(body.messages[0].content[0]).toMatchObject({ type: 'input_audio', input_audio: { format: 'mp3', data: 'AQID' } });
 });
+it('disables MiMo deep thinking and reserves tokens for structured answers', async () => {
+  const calls: any[] = [];
+  vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
+    calls.push(details);
+    details.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: '{"answer":"x"}' } }] }) });
+    return { abort: vi.fn() };
+  });
+  await answerWithAi('q', cfg({ aiApiKey: 'k', aiApiBase: 'https://api.xiaomimimo.com/v1',
+    aiModel: 'mimo-v2.6-flash' }), signal());
+  const body = JSON.parse(calls[0].data);
+  expect(body.thinking).toEqual({ type: 'disabled' });
+  expect(body.max_completion_tokens).toBe(4000);
+});
 it('sends exercise images as OpenAI-compatible multimodal data URIs', async () => {
   const calls: any[] = [];
   vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {

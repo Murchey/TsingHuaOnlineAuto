@@ -123,7 +123,7 @@
 - 图片下载后按 PNG/JPEG/GIF/WebP 字节头识别 MIME，转 base64；最多随请求发送 4 张，单张上限 8 MB。请求格式与 MiMo 官方文档一致：`image_url: { url: "data:<mime>;base64,..." }`。
 - 听力+图片：先使用题目 `audioScript` 或 ASR 转写，再把转写、整页文本、选项/空位和图片一起交给多模态模型；提示词要求以图片中的文字和页面文本为准。
 - 图片解析或下载失败时提示模型“图片读取失败，只依据文本作答”，不暂停练习；若模型不支持图片并返回 HTTP 400/413/415/422，自动重试一次纯文本请求。
-- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 123 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
+- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 125 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
 - **待真实验收：** 在正式脚本管理器中用已配置的 MiMo 视觉模型（`mimo-v2.6-flash`/pro）对真实看图写话和听力+图片题各提交一次，确认模型实际读取了图片而非仅凭文本猜测。
 
 
@@ -160,3 +160,14 @@
 - PAGE_CHANGED：控制器现在把 `PAGE_CHANGED`/`STALE_PAGE` 与 `NEEDS_RELOAD` 一样处理，调用 `store.requestResume()` 后自动 `location.reload()`；面板恢复后重新检测当前练习并继续，最多 3 次，超过后显示 `RELOAD_LIMIT`。
 - 自动验证：新增“成功弹窗点击 Continue”“失败弹窗只有 Continue 时点击 Continue”“页面顶部继续学习按钮”“PAGE_CHANGED 自动刷新并续跑”四项用例；`npm run check` 共 122 项通过。
 - **待真实验收：** 更新 0.4.1 后，在真实闯关成功弹窗点击 Continue 的页面上确认自动进入下一关；当前代码级测试已覆盖按钮优先级与 PAGE_CHANGED 恢复。
+
+
+## 0.4.2 看图填词/标注题词库约束
+
+- 真实页面：`.../6a917a118334d27c2dc344a4`，Unit 2 Clothing / Vocabulary A，`APP-COURSE-TASK-STU` type 3，17 个空位（group 1-17），图片 `66dbf1873c9484188ca5a533`（1000×385）；图片右下蓝框有 18 个词（含重复 hat），17 个编号线指向衣物。
+- 旧问题：页面可见文本只有说明和空行，词库在图片里；空位 JSON 没有 number，模型不知道哪个空位对应图片哪个编号，容易自创词或错位。
+- 修复：保留 `fillBlanks[].group`，空位 JSON 增加 `number`；图片标注题提示先读词库、写 observations、再按编号填词；返回值包含 `words`，校验答案来自词库且重复次数不超过词库词频。
+- MiMo 实测：默认深度思考开启时，3000 tokens 全部用于 reasoning，content 为空；设置 `thinking:{type:"disabled"}` 后同一图片题返回完整 JSON（734 completion tokens，17 个答案 + words）。
+- 图片放大验证：整图直接作答在右侧 13-17 有错位；按左/中/右裁切放大后，左侧 1-4、中部 5-12 和右半 13-17 的编号跟随明显更准确。脚本现在自动生成 3 张重叠放大图（`cropImage`）随请求发送；若浏览器无法裁切则回退到整图。
+- 自动验证：新增图片标注词库校验、自创词重试、MiMo thinking 关闭/4000 tokens 三项用例；`npm run check` 共 125 项通过。
+- **待真实验收：** 更新 0.4.2 后在 344a4 题运行一次，确认 17 个空位按图片词库写入并 Submit 成功；当前接口级流程已验证。

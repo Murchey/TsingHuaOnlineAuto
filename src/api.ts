@@ -166,17 +166,64 @@ export async function fetchImage(url: string, settings: Settings, signal: AbortS
   }
 }
 
+export interface ImageCrop { left: number; top: number; width: number; height: number; scale?: number }
+
+/** Crop/upscale an image into overlapping regions so small numbered labels stay legible. */
+export async function cropImage(image: ImagePart, crops: ImageCrop[]): Promise<ImagePart[]> {
+  const scope = ((globalThis as any).unsafeWindow ?? globalThis) as any;
+  const doc = scope.document as Document | undefined;
+  const ImageCtor = scope.Image || (globalThis as any).Image;
+  if (!doc || typeof ImageCtor !== 'function') return [];
+  const canvas = doc.createElement('canvas');
+  let context: CanvasRenderingContext2D | null = null;
+  try { context = canvas.getContext('2d'); } catch { return []; }
+  if (!context) return [];
+  const element = new ImageCtor();
+  element.src = `data:${image.mime};base64,${image.data}`;
+  try {
+    if (typeof element.decode === 'function') await element.decode();
+    else await new Promise<void>((resolve, reject) => { element.onload = () => resolve(); element.onerror = () => reject(new Error('image load')); });
+    return crops.map(crop => {
+      const sx = Math.max(0, Math.round(crop.left * element.naturalWidth));
+      const sy = Math.max(0, Math.round(crop.top * element.naturalHeight));
+      const sw = Math.max(1, Math.min(element.naturalWidth - sx, Math.round(crop.width * element.naturalWidth)));
+      const sh = Math.max(1, Math.min(element.naturalHeight - sy, Math.round(crop.height * element.naturalHeight)));
+      const scale = crop.scale ?? 3;
+      canvas.width = Math.round(sw * scale);
+      canvas.height = Math.round(sh * scale);
+      context!.imageSmoothingQuality = 'high';
+      context!.drawImage(element, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      const url = canvas.toDataURL('image/jpeg', 0.92);
+      const comma = url.indexOf(',');
+      if (comma < 0) throw new Error('data url');
+      return { mime: 'image/jpeg', data: url.slice(comma + 1) };
+    });
+  } catch { return []; }
+}
+
 export async function answerWithAi(prompt: string, settings: Settings, signal: AbortSignal,
   images: ImagePart[] = []): Promise<unknown> {
   if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '请在面板填写 AI API Key');
-  const response = await request({
-    url: endpoint(settings.aiApiBase, '/chat/completions'), headers: authHeaders(settings.aiApiKey),
-    data: JSON.stringify({ model: settings.aiModel, messages: [{ role: 'system', content: SYSTEM },
+  const body: Record<string, unknown> = {
+    model: settings.aiModel,
+    messages: [{ role: 'system', content: SYSTEM },
       { role: 'user', content: images.length ? [
         ...images.map(image => ({ type: 'image_url',
           image_url: { url: `data:${image.mime};base64,${image.data}` } })),
         { type: 'text', text: prompt },
-      ] : prompt }], temperature: 0.2, stream: false }),
+      ] : prompt }],
+    temperature: 0.2, stream: false,
+  };
+  // MiMo enables deep thinking by default for structured tasks; that spends the whole
+  // completion budget on reasoning and can return empty content. Structured answers only
+  // need the JSON, so disable thinking and reserve enough tokens for image-label grids.
+  if (/mimo/i.test(settings.aiModel) || /xiaomimimo\.com/i.test(settings.aiApiBase)) {
+    body.thinking = { type: 'disabled' };
+    body.max_completion_tokens = 4_000;
+  }
+  const response = await request({
+    url: endpoint(settings.aiApiBase, '/chat/completions'), headers: authHeaders(settings.aiApiKey),
+    data: JSON.stringify(body),
   }, settings, signal);
   const parsed = JSON.parse(response.responseText || '{}') as any;
   const content = parsed?.choices?.[0]?.message?.content;

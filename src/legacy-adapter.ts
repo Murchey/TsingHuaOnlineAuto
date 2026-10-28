@@ -1,7 +1,7 @@
 import { bounded, check, sleep, until } from './async';
 import { canonical, object, stable, text } from './answers';
 import { scoreWithChivox } from './chivox';
-import { answerWithAi, fetchImage, fetchMedia, synthesizeSpeech, transcribeAudio, transcribeVideo,
+import { answerWithAi, cropImage, fetchImage, fetchMedia, synthesizeSpeech, transcribeAudio, transcribeVideo,
   type ImagePart } from './api';
 import { routePath, shown, TsinghuaAdapter } from './adapter';
 import { legacyComponents, runInLegacyZone, type LegacyComponent } from './legacy-angular';
@@ -685,8 +685,30 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
     const options = Array.isArray(q.extension) ? q.extension.map(option => ({
       id: String(object(option).idx), text: text(object(option).val),
     })) : [];
-    const blanks = Array.isArray(task.value) ? task.value.map(object).map(blank => ({ idx: String(blank.idx) })) : [];
+    const blankGroups = new Map((Array.isArray(ext.blanks) ? ext.blanks : []).map(entry => {
+      const value = object(entry);
+      return [String(value.idx), Number(value.group)];
+    }));
+    const blanks = Array.isArray(task.value) ? task.value.map(object).map(blank => {
+      const idx = String(blank.idx), group = blankGroups.get(idx);
+      return Number.isFinite(group) ? { idx, number: group } : { idx };
+    }) : [];
     const blankText = this.blankText(root, blanks.map(blank => String(blank.idx)));
+    // Image-labelling grids have no sentence text around the blanks: the numbers in the
+    // picture are the only mapping. Treat them separately so the model reads the word box,
+    // numbers 1..N, and returns only those original words.
+    const imageOnlyBlanks = !!q.images?.length && task.kind === 'fill' && blanks.length >= 3 &&
+      !blankText.replace(/\[\[BLANK:[^\]]+\]\]/g, '').replace(/\s+/g, '');
+    if (imageOnlyBlanks && aiImages.images.length === 1) {
+      // Numbered picture labels are small; send overlapping left/middle/right enlargements
+      // so the model can follow each line to its actual clothing item.
+      const crops = (await cropImage(aiImages.images[0], [
+        { left: 0, top: 0, width: 0.44, height: 1, scale: 3 },
+        { left: 0.32, top: 0, width: 0.46, height: 1, scale: 3 },
+        { left: 0.58, top: 0, width: 0.42, height: 1, scale: 3 },
+      ])) ?? [];
+      if (crops.length > 1) aiImages.images = crops;
+    }
     // Composite listening pages render their word box / image outside the child question
     // component, so the leaf innerText alone can omit the options the answer must use.
     const pageRoot = (root.closest('app-course-task-stu') as HTMLElement | null) ?? root;
@@ -704,8 +726,9 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
       items: (Array.isArray(ext.items) ? ext.items : []).map(item => ({ id: String(object(item).id), text: String(object(item).text ?? '') })),
     } : null;
     const schema = task.kind === 'choice' ? '{"choice":["选项ID", ...]}' :
-      (task.kind === 'fill' ? (Number(ext.legacyType) === 11 ? '{"fill":[{"idx":"目标ID","answers":["项目ID", ...]}]}' :
-        '{"fill":[{"idx":"空位ID","answer":"答案"}]}') : '{"answer":"完整答案文本"}');
+      (task.kind === 'fill' ? (imageOnlyBlanks ? '{"words":["图片词库中的词", ...],"observations":{"1":"线末端物品"},"fill":[{"idx":"空位ID","answer":"词库原词"}]}' :
+        (Number(ext.legacyType) === 11 ? '{"fill":[{"idx":"目标ID","answers":["项目ID", ...]}]}' :
+        '{"fill":[{"idx":"空位ID","answer":"答案"}]}')) : '{"answer":"完整答案文本"}');
     const prompt = `你正在完成清华社英语旧版练习。只返回一个 JSON 对象，不要 Markdown。
 题型: ${q.type}（${task.kind}）
 题目说明: ${q.instruction || ''}
@@ -723,14 +746,19 @@ ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ''}
 听力/视频转写: ${transcript || '（无）'}
 ${q.video?.length ? '本题包含视频：已下载视频、提取音轨并完成 ASR。请依据转写中的步骤、顺序和细节作答。' : ''}
-${aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` :
-  (aiImages.expected ? '图片: 本题含图片，但图片读取失败；请只依据文本作答。' : '')}
+${imageOnlyBlanks && aiImages.images.length > 1 ? `图片: 已附上 ${aiImages.images.length} 张分区放大图（左侧/中部/右侧）。请在每个分区内跟随编号线，不要跨分区猜测；以图片和页面文本为准。` :
+  (aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` :
+  (aiImages.expected ? '图片: 本题含图片，但图片读取失败；请只依据文本作答。' : ''))}
 返回格式: ${schema}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填空的 answer 必须使用选项中的 ID。' : ''}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 19 ? '对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。' : ''}
 ${Number(ext.legacyType) === 11 ? '每个待分类项必须且只能放入一个目标，全部项目都要分配。' : ''}
 ${Number(ext.legacyType) === 22 ? '判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。' : ''}
 ${Number(ext.legacyType) === 10 ? '匹配题每个目标必须且只能选一个匹配项，每个选项最多用一次；若选项多于目标，可以有不使用的选项。answer 必须是“匹配选项”里的 id 字段，不能返回 a/b/c、描述文本或序号。' : ''}
+${imageOnlyBlanks ? '这是一道看图填词/标注题。图片中的编号与空位的 number 一一对应（1,2,3...）。' +
+  '先为每个编号写 observations（描述线末端实际指向的物品），再按编号从图片中的词库（方框）选择原词。' +
+  '只能使用词库中的原词，不能自创、翻译或用同义词；每个词最多使用一次（词库重复出现的词按次数使用）。' +
+  '先把图片词库中的所有单词放入 words 数组，再填写 fill；words 必须与 fill 中使用的词一致。' : ''}
 ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。' : ''}
 必须严格回答当前题目。`;
     let result: unknown;
@@ -746,6 +774,13 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
     }
     try { return { ...task, value: this.validateAiValue(task, result) }; }
     catch (error) {
+      if (imageOnlyBlanks && error instanceof Halt && error.code === 'AI_ANSWER') {
+        const retryPrompt = prompt + '\n\n上一次返回不符合要求：' + JSON.stringify(result).slice(0, 1500) +
+          '\n请重新仔细读取图片：先列出图片词库中的全部单词 words，再逐条跟随编号线，把每个编号对应的物品用词库原词填入 fill；words 与 fill 必须一致。';
+        const retry = aiImages.images.length ? await answerWithAi(retryPrompt, settings, signal, aiImages.images) :
+          await answerWithAi(retryPrompt, settings, signal);
+        return { ...task, value: this.validateAiValue(task, retry) };
+      }
       // Judge answers are often written as T/F/NI text; retry once with the allowed ids
       // spelled out before pausing the whole run.
       if (Number(ext.legacyType) === 22 && error instanceof Halt && error.code === 'AI_ANSWER') {
@@ -1125,6 +1160,26 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
         const answer = byId.get(String(blank.idx));
         return !answer || (Array.isArray(dragOptions) && !dragOptions.includes(answer));
       })) throw new Halt('AI_ANSWER', 'AI 返回的填空答案缺失、为空或不符合空位/选项');
+      // For image-labelling grids the model must also report the word box it read. Reject
+      // invented synonyms and duplicates beyond the box's own multiplicity before writing.
+      const words = Array.isArray(result.words) ? result.words.map(value => String(value).trim()).filter(Boolean) : [];
+      if (words.length) {
+        const normalize = (value: string): string => value.toLowerCase().replace(/[^a-z0-9'-]+/g, ' ').trim();
+        const allowed = new Map<string, number>();
+        for (const word of words) allowed.set(normalize(word), (allowed.get(normalize(word)) || 0) + 1);
+        const used = new Map<string, number>();
+        for (const item of fill) {
+          const answer = normalize(String(item.answer ?? ''));
+          if (!answer || !allowed.has(answer)) {
+            throw new Halt('AI_ANSWER', `AI 答案不在图片词库中：${String(item.answer ?? '')}`);
+          }
+          const count = (used.get(answer) || 0) + 1;
+          if (count > (allowed.get(answer) || 0)) {
+            throw new Halt('AI_ANSWER', `AI 重复使用了图片词库中的词：${String(item.answer ?? '')}`);
+          }
+          used.set(answer, count);
+        }
+      }
       return blanks.map(blank => ({ idx: String(blank.idx), answer: byId.get(String(blank.idx))! }));
     }
     if (task.kind === 'writing') {

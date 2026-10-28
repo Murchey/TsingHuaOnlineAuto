@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.4.1
+// @version      0.4.2
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -962,12 +962,51 @@
       return void 0;
     }
   }
+  async function cropImage(image, crops) {
+    const scope = globalThis.unsafeWindow ?? globalThis;
+    const doc = scope.document;
+    const ImageCtor = scope.Image || globalThis.Image;
+    if (!doc || typeof ImageCtor !== "function") return [];
+    const canvas = doc.createElement("canvas");
+    let context = null;
+    try {
+      context = canvas.getContext("2d");
+    } catch {
+      return [];
+    }
+    if (!context) return [];
+    const element = new ImageCtor();
+    element.src = `data:${image.mime};base64,${image.data}`;
+    try {
+      if (typeof element.decode === "function") await element.decode();
+      else await new Promise((resolve, reject) => {
+        element.onload = () => resolve();
+        element.onerror = () => reject(new Error("image load"));
+      });
+      return crops.map((crop) => {
+        const sx = Math.max(0, Math.round(crop.left * element.naturalWidth));
+        const sy = Math.max(0, Math.round(crop.top * element.naturalHeight));
+        const sw = Math.max(1, Math.min(element.naturalWidth - sx, Math.round(crop.width * element.naturalWidth)));
+        const sh = Math.max(1, Math.min(element.naturalHeight - sy, Math.round(crop.height * element.naturalHeight)));
+        const scale = crop.scale ?? 3;
+        canvas.width = Math.round(sw * scale);
+        canvas.height = Math.round(sh * scale);
+        context.imageSmoothingQuality = "high";
+        context.drawImage(element, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        const url = canvas.toDataURL("image/jpeg", 0.92);
+        const comma = url.indexOf(",");
+        if (comma < 0) throw new Error("data url");
+        return { mime: "image/jpeg", data: url.slice(comma + 1) };
+      });
+    } catch {
+      return [];
+    }
+  }
   async function answerWithAi(prompt, settings, signal, images = []) {
     if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "请在面板填写 AI API Key");
-    const response = await request({
-      url: endpoint(settings.aiApiBase, "/chat/completions"),
-      headers: authHeaders(settings.aiApiKey),
-      data: JSON.stringify({ model: settings.aiModel, messages: [
+    const body = {
+      model: settings.aiModel,
+      messages: [
         { role: "system", content: SYSTEM },
         { role: "user", content: images.length ? [
           ...images.map((image) => ({
@@ -976,7 +1015,18 @@
           })),
           { type: "text", text: prompt }
         ] : prompt }
-      ], temperature: 0.2, stream: false })
+      ],
+      temperature: 0.2,
+      stream: false
+    };
+    if (/mimo/i.test(settings.aiModel) || /xiaomimimo\.com/i.test(settings.aiApiBase)) {
+      body.thinking = { type: "disabled" };
+      body.max_completion_tokens = 4e3;
+    }
+    const response = await request({
+      url: endpoint(settings.aiApiBase, "/chat/completions"),
+      headers: authHeaders(settings.aiApiKey),
+      data: JSON.stringify(body)
     }, settings, signal);
     const parsed = JSON.parse(response.responseText || "{}");
     const content = parsed?.choices?.[0]?.message?.content;
@@ -1187,7 +1237,11 @@
       if (blanks.some((b) => typeof b.id !== "string" || !/^[\w-]+$/.test(b.id))) throw new Halt("DATA_SHAPE", "旧版填空标识格式异常");
       q.stem = blanks.map((b) => `<span class="zty-exercise-item-fill-blank" id="${b.id}"></span>`).join("");
       q.answer = blanks.map((b) => ({ idx: b.id, val: b.answer }));
-      q.extension = { legacyType: type, options: Array.isArray(e.dragged) ? e.dragged.map((d) => object(d).id) : [] };
+      q.extension = {
+        legacyType: type,
+        options: Array.isArray(e.dragged) ? e.dragged.map((d) => object(d).id) : [],
+        blanks: blanks.map((b) => ({ idx: b.id, group: Number.isFinite(Number(b.group)) ? Number(b.group) : void 0 }))
+      };
       if (type === 24) {
         const ids = q.extension.options;
         if (new Set(ids).size !== ids.length || blanks.some((b) => typeof b.answer !== "string" || !ids.includes(b.answer))) {
@@ -1419,6 +1473,7 @@
             const before = object(contentItems[index - 1]).text, after = object(contentItems[index + 1]).text;
             blanks.push({
               idx,
+              group: Number.isFinite(Number(item.group)) ? Number(item.group) : void 0,
               before: typeof before === "string" ? before : "",
               after: typeof after === "string" ? after : ""
             });
@@ -2219,8 +2274,24 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
         id: String(object(option).idx),
         text: text(object(option).val)
       })) : [];
-      const blanks = Array.isArray(task.value) ? task.value.map(object).map((blank) => ({ idx: String(blank.idx) })) : [];
+      const blankGroups = new Map((Array.isArray(ext.blanks) ? ext.blanks : []).map((entry) => {
+        const value = object(entry);
+        return [String(value.idx), Number(value.group)];
+      }));
+      const blanks = Array.isArray(task.value) ? task.value.map(object).map((blank) => {
+        const idx = String(blank.idx), group = blankGroups.get(idx);
+        return Number.isFinite(group) ? { idx, number: group } : { idx };
+      }) : [];
       const blankText = this.blankText(root, blanks.map((blank) => String(blank.idx)));
+      const imageOnlyBlanks = !!q.images?.length && task.kind === "fill" && blanks.length >= 3 && !blankText.replace(/\[\[BLANK:[^\]]+\]\]/g, "").replace(/\s+/g, "");
+      if (imageOnlyBlanks && aiImages.images.length === 1) {
+        const crops = await cropImage(aiImages.images[0], [
+          { left: 0, top: 0, width: 0.44, height: 1, scale: 3 },
+          { left: 0.32, top: 0, width: 0.46, height: 1, scale: 3 },
+          { left: 0.58, top: 0, width: 0.42, height: 1, scale: 3 }
+        ]) ?? [];
+        if (crops.length > 1) aiImages.images = crops;
+      }
       const pageRoot = root.closest("app-course-task-stu") ?? root;
       const pageText = (pageRoot.innerText || pageRoot.textContent || root.innerText || root.textContent || "").slice(0, 8e3);
       const judge = Number(ext.legacyType) === 22 ? {
@@ -2235,7 +2306,7 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
         targets: (Array.isArray(ext.targets) ? ext.targets : []).map((target) => ({ id: String(object(target).id), text: String(object(target).text ?? "") })),
         items: (Array.isArray(ext.items) ? ext.items : []).map((item) => ({ id: String(object(item).id), text: String(object(item).text ?? "") }))
       } : null;
-      const schema = task.kind === "choice" ? '{"choice":["选项ID", ...]}' : task.kind === "fill" ? Number(ext.legacyType) === 11 ? '{"fill":[{"idx":"目标ID","answers":["项目ID", ...]}]}' : '{"fill":[{"idx":"空位ID","answer":"答案"}]}' : '{"answer":"完整答案文本"}';
+      const schema = task.kind === "choice" ? '{"choice":["选项ID", ...]}' : task.kind === "fill" ? imageOnlyBlanks ? '{"words":["图片词库中的词", ...],"observations":{"1":"线末端物品"},"fill":[{"idx":"空位ID","answer":"词库原词"}]}' : Number(ext.legacyType) === 11 ? '{"fill":[{"idx":"目标ID","answers":["项目ID", ...]}]}' : '{"fill":[{"idx":"空位ID","answer":"答案"}]}' : '{"answer":"完整答案文本"}';
       const prompt = `你正在完成清华社英语旧版练习。只返回一个 JSON 对象，不要 Markdown。
 题型: ${q.type}（${task.kind}）
 题目说明: ${q.instruction || ""}
@@ -2253,13 +2324,14 @@ ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ""}
 听力/视频转写: ${transcript || "（无）"}
 ${q.video?.length ? "本题包含视频：已下载视频、提取音轨并完成 ASR。请依据转写中的步骤、顺序和细节作答。" : ""}
-${aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` : aiImages.expected ? "图片: 本题含图片，但图片读取失败；请只依据文本作答。" : ""}
+${imageOnlyBlanks && aiImages.images.length > 1 ? `图片: 已附上 ${aiImages.images.length} 张分区放大图（左侧/中部/右侧）。请在每个分区内跟随编号线，不要跨分区猜测；以图片和页面文本为准。` : aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` : aiImages.expected ? "图片: 本题含图片，但图片读取失败；请只依据文本作答。" : ""}
 返回格式: ${schema}
 ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空的 answer 必须使用选项中的 ID。" : ""}
 ${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
 ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个目标，全部项目都要分配。" : ""}
 ${Number(ext.legacyType) === 22 ? "判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。" : ""}
 ${Number(ext.legacyType) === 10 ? "匹配题每个目标必须且只能选一个匹配项，每个选项最多用一次；若选项多于目标，可以有不使用的选项。answer 必须是“匹配选项”里的 id 字段，不能返回 a/b/c、描述文本或序号。" : ""}
+${imageOnlyBlanks ? "这是一道看图填词/标注题。图片中的编号与空位的 number 一一对应（1,2,3...）。先为每个编号写 observations（描述线末端实际指向的物品），再按编号从图片中的词库（方框）选择原词。只能使用词库中的原词，不能自创、翻译或用同义词；每个词最多使用一次（词库重复出现的词按次数使用）。先把图片词库中的所有单词放入 words 数组，再填写 fill；words 必须与 fill 中使用的词一致。" : ""}
 ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。" : ""}
 必须严格回答当前题目。`;
       let result;
@@ -2272,6 +2344,11 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       try {
         return { ...task, value: this.validateAiValue(task, result) };
       } catch (error) {
+        if (imageOnlyBlanks && error instanceof Halt && error.code === "AI_ANSWER") {
+          const retryPrompt = prompt + "\n\n上一次返回不符合要求：" + JSON.stringify(result).slice(0, 1500) + "\n请重新仔细读取图片：先列出图片词库中的全部单词 words，再逐条跟随编号线，把每个编号对应的物品用词库原词填入 fill；words 与 fill 必须一致。";
+          const retry = aiImages.images.length ? await answerWithAi(retryPrompt, settings, signal, aiImages.images) : await answerWithAi(retryPrompt, settings, signal);
+          return { ...task, value: this.validateAiValue(task, retry) };
+        }
         if (Number(ext.legacyType) === 22 && error instanceof Halt && error.code === "AI_ANSWER") {
           const allowed = (Array.isArray(ext.options) ? ext.options : []).map((option) => {
             const entry = object(option);
@@ -2632,6 +2709,24 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
           const answer = byId.get(String(blank.idx));
           return !answer || Array.isArray(dragOptions) && !dragOptions.includes(answer);
         })) throw new Halt("AI_ANSWER", "AI 返回的填空答案缺失、为空或不符合空位/选项");
+        const words = Array.isArray(result.words) ? result.words.map((value2) => String(value2).trim()).filter(Boolean) : [];
+        if (words.length) {
+          const normalize = (value2) => value2.toLowerCase().replace(/[^a-z0-9'-]+/g, " ").trim();
+          const allowed = /* @__PURE__ */ new Map();
+          for (const word of words) allowed.set(normalize(word), (allowed.get(normalize(word)) || 0) + 1);
+          const used = /* @__PURE__ */ new Map();
+          for (const item of fill) {
+            const answer = normalize(String(item.answer ?? ""));
+            if (!answer || !allowed.has(answer)) {
+              throw new Halt("AI_ANSWER", `AI 答案不在图片词库中：${String(item.answer ?? "")}`);
+            }
+            const count = (used.get(answer) || 0) + 1;
+            if (count > (allowed.get(answer) || 0)) {
+              throw new Halt("AI_ANSWER", `AI 重复使用了图片词库中的词：${String(item.answer ?? "")}`);
+            }
+            used.set(answer, count);
+          }
+        }
         return blanks.map((blank) => ({ idx: String(blank.idx), answer: byId.get(String(blank.idx)) }));
       }
       if (task.kind === "writing") {
@@ -3257,7 +3352,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.4.1";
+      this.el("version").textContent = false ? "dev" : "0.4.2";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3467,7 +3562,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.4.1",
+        version: false ? "dev" : "0.4.2",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

@@ -10,7 +10,7 @@ import { answerWithAi, fetchImage, fetchMedia, synthesizeSpeech, transcribeAudio
 
 vi.mock('../src/chivox', () => ({ scoreWithChivox: vi.fn() }));
 vi.mock('../src/api', () => ({ synthesizeSpeech: vi.fn(), answerWithAi: vi.fn(), transcribeAudio: vi.fn(),
-  transcribeVideo: vi.fn(), fetchImage: vi.fn(), fetchMedia: vi.fn() }));
+  transcribeVideo: vi.fn(), fetchImage: vi.fn(), fetchMedia: vi.fn(), cropImage: vi.fn(async () => []) }));
 
 const path = '/legacy/course-study-student/10/20/30/example-key';
 const signal = () => new AbortController().signal;
@@ -85,7 +85,7 @@ const exercise10 = () => ({ id: 'q-10', type: 10, contentString: 'Match each ite
   dragged: ['Option one', 'Option two'].map((text, index) => ({ id: 'i-' + (index + 1), content: text,
     styleContent: { paragraphs: [{ contentItems: [{ text }] }] } })) });
 
-beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); history.replaceState({}, '', path); });
+beforeEach(() => { vi.resetAllMocks(); localStorage.clear(); history.replaceState({}, '', path); });
 afterEach(() => vi.unstubAllGlobals());
 
 describe('legacy production route regression', () => {
@@ -451,6 +451,42 @@ describe('legacy production route regression', () => {
     expect(fetchImage).toHaveBeenCalledWith('https://cdn.example/img-res-3.png', settings, expect.anything());
     expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('Write about the picture'), settings,
       expect.anything(), [{ mime: 'image/png', data: 'DATAPNG' }]);
+  });
+  it('uses the image word box and blank numbers for picture labelling', async () => {
+    document.body.innerHTML = '<app-course-task-stu><div class="mould">' +
+      '<lib-exercise-res-show><div class="show-img"><img src="https://cdn.example/label.png"></div></lib-exercise-res-show>' +
+      '<lib-fill-blank-exercise-cs-study>' +
+      ['b1', 'b2', 'b3'].map(id => '<span contenteditable="true" id="a-' + id + '"></span>').join('') +
+      '</lib-fill-blank-exercise-cs-study></div><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.querySelector<HTMLElement>('lib-fill-blank-exercise-cs-study')!;
+    const exercise: any = { id: 'label-q', type: 3, contentString: 'Label the pictures below with the words from the box.',
+      image: 'img-res', fillBlanks: [
+        { id: 'b1', group: 1, answer: '' }, { id: 'b2', group: 2, answer: '' }, { id: 'b3', group: 3, answer: '' }] };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Label',
+      doRecord: { type: 3, answer: {} }, loadDoRecord() {}, doRecordChange: { emit: vi.fn() } };
+    for (const id of ['b1', 'b2', 'b3']) {
+      const field = host.querySelector<HTMLElement>('#a-' + id)!;
+      field.addEventListener('input', () => { c.doRecord.answer[id] = { id, score: 0, content: field.innerText }; });
+    }
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0, doRecord: c.doRecord }), { allowMissing: true })[0];
+    vi.mocked(fetchImage).mockResolvedValue({ mime: 'image/png', data: 'IMG' });
+    vi.mocked(answerWithAi)
+      .mockResolvedValueOnce({ words: ['hat', 'shirt', 'pants'], fill: [
+        { idx: 'b1', answer: 'cap' }, { idx: 'b2', answer: 'shirt' }, { idx: 'b3', answer: 'pants' }] })
+      .mockResolvedValueOnce({ words: ['hat', 'shirt', 'pants'], fill: [
+        { idx: 'b1', answer: 'hat' }, { idx: 'b2', answer: 'shirt' }, { idx: 'b3', answer: 'pants' }] });
+    await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    const prompt = vi.mocked(answerWithAi).mock.calls[0][0] as string;
+    expect(prompt).toContain('看图填词');
+    expect(prompt).toContain('"number":1');
+    expect(prompt).toContain('words');
+    expect(answerWithAi).toHaveBeenCalledWith(expect.any(String), expect.anything(), expect.anything(),
+      [{ mime: 'image/png', data: 'IMG' }]);
+    expect(c.doRecord.answer['b1'].content).toBe('hat');
   });
   it('keeps answering with text when the picture cannot be downloaded', async () => {
     document.body.innerHTML = '<app-course-task-stu><div class="mould">' +

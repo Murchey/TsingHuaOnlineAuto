@@ -82,7 +82,23 @@ export function legacyQuestion(exercise: unknown): Question {
     q.stem = blanks.map(b => `<span class="zty-exercise-item-fill-blank" id="${blankId(b)}"></span>`).join('');
     q.answer = blanks.map(b => ({ idx: blankId(b), val: b.answer }));
     // Keep all option identities in the fingerprint, including drag-and-drop assignments.
-    q.extension = { legacyType: type, options: Array.isArray(e.dragged) ? e.dragged.map(d => object(d).id) : [],
+    const dragItems = type === 24 && Array.isArray(e.dragged) ? e.dragged.map(value => {
+      const item = object(value);
+      return { id: String(item.id ?? ''), text: richText(item.content) || richText(item.styleContent) || String(item.content ?? '') };
+    }) : [];
+    const targets = type === 24 && Array.isArray(e.drag) ? e.drag.map(value => {
+      const target = object(value), content = object(target.content);
+      const paragraphs = Array.isArray(content.paragraphs) ? content.paragraphs as unknown[] : [];
+      const items = paragraphs.flatMap(paragraph => Array.isArray(object(paragraph).contentItems) ?
+        object(paragraph).contentItems as unknown[] : []);
+      const text = items.filter(part => Number(object(part).type) === 1)
+        .map(part => String(object(part).text ?? '')).join('').trim();
+      const blank = items.map(object).find(part => Number(part.type) === 2 && typeof part.id === 'string');
+      return { idx: blank ? String(blank.id) : String(target.id ?? ''), text };
+    }).filter(target => !!target.idx) : [];
+    q.extension = { legacyType: type,
+      options: dragItems.length ? dragItems.map(item => item.id) : (Array.isArray(e.dragged) ? e.dragged.map(d => object(d).id) : []),
+      items: dragItems, targets,
       blanks: blanks.map(b => ({ idx: blankId(b), group: Number.isFinite(Number(b.group)) ? Number(b.group) : undefined })) };
     const known = KNOWN_ANSWERS[String(e.id)];
     if (known && Array.isArray(q.answer)) {
@@ -95,7 +111,13 @@ export function legacyQuestion(exercise: unknown): Question {
     }
     if (type === 24) {
       const ids = (q.extension as { options: unknown[] }).options;
-      if (new Set(ids).size !== ids.length || blanks.some(b => typeof b.answer !== 'string' || !ids.includes(b.answer))) {
+      // A drag-fill page may ship no official answer at all; with AI allowed, leave the
+      // blanks empty and let the model choose from the provided option ids/texts. Only
+      // reject a non-empty answer that is not one of the dragged options.
+      if (new Set(ids).size !== ids.length || blanks.some(b => {
+        const answer = typeof b.answer === 'string' ? b.answer.trim() : '';
+        return !!answer && !ids.includes(answer);
+      })) {
         throw new Halt('NO_ANSWER', '拖拽填空的答案缺失或无法唯一匹配选项');
       }
     }

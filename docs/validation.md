@@ -123,7 +123,7 @@
 - 图片下载后按 PNG/JPEG/GIF/WebP 字节头识别 MIME，转 base64；最多随请求发送 4 张，单张上限 8 MB。请求格式与 MiMo 官方文档一致：`image_url: { url: "data:<mime>;base64,..." }`。
 - 听力+图片：先使用题目 `audioScript` 或 ASR 转写，再把转写、整页文本、选项/空位和图片一起交给多模态模型；提示词要求以图片中的文字和页面文本为准。
 - 图片解析或下载失败时提示模型“图片读取失败，只依据文本作答”，不暂停练习；若模型不支持图片并返回 HTTP 400/413/415/422，自动重试一次纯文本请求。
-- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 128 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
+- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 129 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
 - **待真实验收：** 在正式脚本管理器中用已配置的 MiMo 视觉模型（`mimo-v2.6-flash`/pro）对真实看图写话和听力+图片题各提交一次，确认模型实际读取了图片而非仅凭文本猜测。
 
 
@@ -190,3 +190,13 @@
 - 修复：`contentBlankIds` 按 group 使用 content id；type 19 也按 group 对齐；该题加入已验证 17 答案；`fill()` 精确 id 失败时按顺序回退并别名到期望记录 id。
 - 自动验证：新增“content id 优先于 stale fillBlanks id + 已知图片答案”用例；`npm run check` 共 128 项通过。
 - **待真实验收：** 更新 0.4.4 后重做 Goal 1，确认 Vocabulary A 34/34 且 Goal 总分达到 70 以上；若最后 Conversation 填空仍低分，再单独检查该 task 的答案。
+
+## 0.4.5 Type 24 拖拽填空与自动 Release
+
+- 真实页面：Unit 3 Lifestyles > Goal 1 > Language Expansion: Compound Adjectives > A（page `6a917a118334d27c2dc344f4`），type 24，8 个空位，8 个 dragged 选项，所有 `fillBlanks[].answer` 为空。
+- 旧错误：`legacyQuestion` 在 type 24 上要求每个 `fillBlanks[].answer` 非空且属于 `dragged`，页面无官方答案时直接抛 `NO_ANSWER`。
+- 修复：仅拒绝“非空但不在选项中的答案”；提示词增加 `拖拽选项`（id + a-h 文本）和 `拖拽空位句子`（从 `drag[].content` 提取左侧形容词），AI 返回选项 id；校验时支持选项原文、a-h 标签、唯一包含关系反查 id。
+- 真实 AI 结果：fast-paced→b、homemade→h、heartwarming→e、lifelong→g、stress-free→c、homegrown→f、overworked→a、low-calorie→d，8/8 匹配正确。
+- 新增 `.github/workflows/release.yml`：push main 或手动触发，`npm ci` → `npm run check` → 读取版本/短 SHA → 创建或更新 Release，上传 `dist/tsinghua-online-auto.user.js` 和 `.meta.js`。
+- 自动验证：新增 type 24 无官方答案 + AI 文本/标签反查用例；`npm run check` 共 129 项通过。
+- **待真实验收：** 更新 0.4.5 后在 344f4 运行一次，确认 8 个拖拽匹配提交成功；若 type 24 页面仍有布局差异，导出该题数据继续适配。

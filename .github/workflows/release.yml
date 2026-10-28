@@ -1,0 +1,65 @@
+name: Release userscript
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck, build and test
+        run: npm run check
+
+      - name: Read version and commit
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA=${GITHUB_SHA::7}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION-$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: v${{ steps.version.outputs.version }} (${{ steps.version.outputs.short_sha }})
+          body: |
+            Automated build from commit `${{ github.sha }}` on `${{ github.ref_name }}`.
+
+            - Version: `${{ steps.version.outputs.version }}`
+            - Commit: `${{ steps.version.outputs.short_sha }}`
+            - Files: `tsinghua-online-auto.user.js`, `tsinghua-online-auto.meta.js`
+          files: |
+            dist/tsinghua-online-auto.user.js
+            dist/tsinghua-online-auto.meta.js
+          generate_release_notes: true
+          make_latest: true
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

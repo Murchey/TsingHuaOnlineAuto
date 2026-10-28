@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.4.4
+// @version      0.4.5
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -1309,9 +1309,23 @@
       const blankId = (b) => contentIds.get(Number(b.group)) ?? String(b.id);
       q.stem = blanks.map((b) => `<span class="zty-exercise-item-fill-blank" id="${blankId(b)}"></span>`).join("");
       q.answer = blanks.map((b) => ({ idx: blankId(b), val: b.answer }));
+      const dragItems = type === 24 && Array.isArray(e.dragged) ? e.dragged.map((value) => {
+        const item = object(value);
+        return { id: String(item.id ?? ""), text: richText(item.content) || richText(item.styleContent) || String(item.content ?? "") };
+      }) : [];
+      const targets = type === 24 && Array.isArray(e.drag) ? e.drag.map((value) => {
+        const target = object(value), content = object(target.content);
+        const paragraphs = Array.isArray(content.paragraphs) ? content.paragraphs : [];
+        const items = paragraphs.flatMap((paragraph) => Array.isArray(object(paragraph).contentItems) ? object(paragraph).contentItems : []);
+        const text2 = items.filter((part) => Number(object(part).type) === 1).map((part) => String(object(part).text ?? "")).join("").trim();
+        const blank = items.map(object).find((part) => Number(part.type) === 2 && typeof part.id === "string");
+        return { idx: blank ? String(blank.id) : String(target.id ?? ""), text: text2 };
+      }).filter((target) => !!target.idx) : [];
       q.extension = {
         legacyType: type,
-        options: Array.isArray(e.dragged) ? e.dragged.map((d) => object(d).id) : [],
+        options: dragItems.length ? dragItems.map((item) => item.id) : Array.isArray(e.dragged) ? e.dragged.map((d) => object(d).id) : [],
+        items: dragItems,
+        targets,
         blanks: blanks.map((b) => ({ idx: blankId(b), group: Number.isFinite(Number(b.group)) ? Number(b.group) : void 0 }))
       };
       const known = KNOWN_ANSWERS[String(e.id)];
@@ -1325,7 +1339,10 @@
       }
       if (type === 24) {
         const ids = q.extension.options;
-        if (new Set(ids).size !== ids.length || blanks.some((b) => typeof b.answer !== "string" || !ids.includes(b.answer))) {
+        if (new Set(ids).size !== ids.length || blanks.some((b) => {
+          const answer = typeof b.answer === "string" ? b.answer.trim() : "";
+          return !!answer && !ids.includes(answer);
+        })) {
           throw new Halt("NO_ANSWER", "拖拽填空的答案缺失或无法唯一匹配选项");
         }
       }
@@ -2368,6 +2385,10 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
         id: String(object(option).idx),
         text: text(object(option).val)
       })) : [];
+      const dragItems = Number(ext.legacyType) === 24 && Array.isArray(ext.items) ? ext.items.map((item) => {
+        const value = object(item);
+        return { id: String(value.id ?? ""), text: String(value.text ?? "") };
+      }) : [];
       const blankGroups = new Map((Array.isArray(ext.blanks) ? ext.blanks : []).map((entry) => {
         const value = object(entry);
         return [String(value.idx), Number(value.group)];
@@ -2408,6 +2429,8 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
 页面可见文本（含词库/图片说明）:
 ${pageText}
 选项: ${JSON.stringify(options)}
+${dragItems.length ? `拖拽选项: ${JSON.stringify(dragItems)}` : ""}
+${Number(ext.legacyType) === 24 && Array.isArray(ext.targets) ? `拖拽空位句子: ${JSON.stringify(ext.targets)}` : ""}
 空位: ${JSON.stringify(blanks)}
 题目原句（[[BLANK:ID]] 为待填空格）: ${blankText || "（无）"}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
@@ -2420,7 +2443,7 @@ ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 ${q.video?.length ? "本题包含视频：已下载视频、提取音轨并完成 ASR。请依据转写中的步骤、顺序和细节作答。" : ""}
 ${imageOnlyBlanks && aiImages.images.length > 1 ? `图片: 已附上 ${aiImages.images.length} 张分区放大图（左侧/中部/右侧）。请在每个分区内跟随编号线，不要跨分区猜测；以图片和页面文本为准。` : aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` : aiImages.expected ? "图片: 本题含图片，但图片读取失败；请只依据文本作答。" : ""}
 返回格式: ${schema}
-${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空的 answer 必须使用选项中的 ID。" : ""}
+${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空（type 24）：answer 必须是“拖拽选项”的 id 字段；先根据空位左侧的形容词/句子和页面右侧释义选择匹配项；每个选项最多用一次，全部空位都要分配。" : ""}
 ${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
 ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个目标，全部项目都要分配。" : ""}
 ${Number(ext.legacyType) === 22 ? "判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。" : ""}
@@ -2820,8 +2843,29 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       if (task.kind === "fill") {
         const blanks = Array.isArray(task.value) ? task.value.map(object) : [];
         const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
-        const byId = new Map(fill.map((item) => [String(item.idx), String(item.answer ?? "").trim()]));
-        const dragOptions = object(q.extension).legacyType === 24 ? object(q.extension).options : null;
+        const dragExt = object(q.extension);
+        const dragOptions = dragExt.legacyType === 24 ? dragExt.options : null;
+        const dragItems = dragExt.legacyType === 24 && Array.isArray(dragExt.items) ? dragExt.items.map(object) : [];
+        const normalizeDrag = (value2) => typeof value2 === "string" ? value2.trim().toLowerCase().replace(/^[a-z][.)]\s+/i, "").replace(/[.。!！,，;；:：]+$/g, "").replace(/\s+/g, " ") : "";
+        const dragAnswer = (value2) => {
+          const raw = String(value2 ?? "").trim();
+          if (!raw || !dragItems.length) return raw;
+          if (Array.isArray(dragOptions) && dragOptions.includes(raw)) return raw;
+          const normalized = normalizeDrag(raw);
+          const exact = dragItems.find((item) => normalizeDrag(item.text) === normalized);
+          if (exact) return String(exact.id);
+          const label = /^([a-z])[.)]\s+/i.exec(raw)?.[1]?.toLowerCase();
+          if (label) {
+            const byLabel = dragItems.find((item) => new RegExp("^" + label + "[.)]\\s+", "i").test(String(item.text)));
+            if (byLabel) return String(byLabel.id);
+          }
+          const contained = dragItems.filter((item) => {
+            const text2 = normalizeDrag(item.text);
+            return text2.length > 8 && normalized.length > 8 && (text2.includes(normalized) || normalized.includes(text2));
+          });
+          return contained.length === 1 ? String(contained[0].id) : raw;
+        };
+        const byId = new Map(fill.map((item) => [String(item.idx), dragItems.length ? dragAnswer(item.answer) : String(item.answer ?? "").trim()]));
         if (!blanks.length || blanks.some((blank) => {
           const answer = byId.get(String(blank.idx));
           return !answer || Array.isArray(dragOptions) && !dragOptions.includes(answer);
@@ -3473,7 +3517,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.4.4";
+      this.el("version").textContent = false ? "dev" : "0.4.5";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3683,7 +3727,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.4.4",
+        version: false ? "dev" : "0.4.5",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

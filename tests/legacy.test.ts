@@ -102,6 +102,32 @@ describe('legacy production route regression', () => {
     const broken = exercise(); broken.fillBlanks[0].answer = 'not-an-option';
     expect(() => legacyData({ exercise: broken, submitNum: 0 })).toThrow('拖拽填空');
   });
+  it('lets AI choose type 24 drag options when no official answers exist', async () => {
+    const exercise24: any = { id: 'q24-noanswer', type: 24, contentString: 'Match the meanings. Drag and drop.',
+      fillBlanks: [{ id: 'blank-a', group: 1, answer: '' }, { id: 'blank-b', group: 2, answer: '' }],
+      dragged: [{ id: 'option-a', content: 'a. first meaning' }, { id: 'option-b', content: 'b. second meaning' }] };
+    document.body.innerHTML = '<app-course-task-stu><lib-fill-blank-drag-exercise-cs-stu-do></lib-fill-blank-drag-exercise-cs-stu-do><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise24, pageTitle: 'Drag', doRecord: { type: 24, answer: {} },
+      loadDoRecord() {} };
+    const leaf: any = { status: 1, exercise: exercise24, doRecord: c.doRecord, doRecordChange: { emit: vi.fn() },
+      delAnswer(id: string) { this.doRecord.answer[id] = { choiceId: '' }; },
+      drag(event: any) { this.doRecord.answer[event.container.id] = { choiceId: event.previousContainer.id, score: 0 }; } };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const data = legacyData({ exercise: exercise24, submitNum: 0 });
+    const task = planTasks(data, { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ fill: [
+      { idx: 'blank-a', answer: 'b. second meaning' }, { idx: 'blank-b', answer: 'option-a' }] });
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(value).toEqual([{ idx: 'blank-a', answer: 'option-b' }, { idx: 'blank-b', answer: 'option-a' }]);
+    expect(leaf.doRecord.answer['blank-a'].choiceId).toBe('option-b');
+    const prompt = vi.mocked(answerWithAi).mock.calls[0][0] as string;
+    expect(prompt).toContain('拖拽选项');
+    expect(prompt).toContain('a. first meaning');
+  });
   it('plans role-play type 9 as recording and recognizes only the selected role as complete', () => {
     const roleExercise = { id: 'role-q', type: 9,
       roles: [{ id: 'role-1', name: 'Adrian' }, { id: 'role-2', name: 'Beth' }],

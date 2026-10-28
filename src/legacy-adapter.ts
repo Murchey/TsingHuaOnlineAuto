@@ -699,6 +699,10 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
     const options = Array.isArray(q.extension) ? q.extension.map(option => ({
       id: String(object(option).idx), text: text(object(option).val),
     })) : [];
+    const dragItems = Number(ext.legacyType) === 24 && Array.isArray(ext.items) ? ext.items.map(item => {
+      const value = object(item);
+      return { id: String(value.id ?? ''), text: String(value.text ?? '') };
+    }) : [];
     const blankGroups = new Map((Array.isArray(ext.blanks) ? ext.blanks : []).map(entry => {
       const value = object(entry);
       return [String(value.idx), Number(value.group)];
@@ -750,6 +754,8 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
 页面可见文本（含词库/图片说明）:
 ${pageText}
 选项: ${JSON.stringify(options)}
+${dragItems.length ? `拖拽选项: ${JSON.stringify(dragItems)}` : ''}
+${Number(ext.legacyType) === 24 && Array.isArray(ext.targets) ? `拖拽空位句子: ${JSON.stringify(ext.targets)}` : ''}
 空位: ${JSON.stringify(blanks)}
 题目原句（[[BLANK:ID]] 为待填空格）: ${blankText || '（无）'}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
@@ -764,7 +770,7 @@ ${imageOnlyBlanks && aiImages.images.length > 1 ? `图片: 已附上 ${aiImages.
   (aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` :
   (aiImages.expected ? '图片: 本题含图片，但图片读取失败；请只依据文本作答。' : ''))}
 返回格式: ${schema}
-${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填空的 answer 必须使用选项中的 ID。' : ''}
+${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填空（type 24）：answer 必须是“拖拽选项”的 id 字段；先根据空位左侧的形容词/句子和页面右侧释义选择匹配项；每个选项最多用一次，全部空位都要分配。' : ''}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 19 ? '对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。' : ''}
 ${Number(ext.legacyType) === 11 ? '每个待分类项必须且只能放入一个目标，全部项目都要分配。' : ''}
 ${Number(ext.legacyType) === 22 ? '判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。' : ''}
@@ -1189,8 +1195,30 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
     if (task.kind === 'fill') {
       const blanks = Array.isArray(task.value) ? task.value.map(object) : [];
       const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
-      const byId = new Map(fill.map(item => [String(item.idx), String(item.answer ?? '').trim()]));
-      const dragOptions = object(q.extension).legacyType === 24 ? object(q.extension).options : null;
+      const dragExt = object(q.extension);
+      const dragOptions = dragExt.legacyType === 24 ? dragExt.options : null;
+      const dragItems = dragExt.legacyType === 24 && Array.isArray(dragExt.items) ? dragExt.items.map(object) : [];
+      const normalizeDrag = (value: unknown): string => typeof value === 'string' ? value.trim().toLowerCase()
+        .replace(/^[a-z][.)]\s+/i, '').replace(/[.。!！,，;；:：]+$/g, '').replace(/\s+/g, ' ') : '';
+      const dragAnswer = (value: unknown): string => {
+        const raw = String(value ?? '').trim();
+        if (!raw || !dragItems.length) return raw;
+        if (Array.isArray(dragOptions) && dragOptions.includes(raw)) return raw;
+        const normalized = normalizeDrag(raw);
+        const exact = dragItems.find(item => normalizeDrag(item.text) === normalized);
+        if (exact) return String(exact.id);
+        const label = /^([a-z])[.)]\s+/i.exec(raw)?.[1]?.toLowerCase();
+        if (label) {
+          const byLabel = dragItems.find(item => new RegExp('^' + label + '[.)]\\s+', 'i').test(String(item.text)));
+          if (byLabel) return String(byLabel.id);
+        }
+        const contained = dragItems.filter(item => {
+          const text = normalizeDrag(item.text);
+          return text.length > 8 && normalized.length > 8 && (text.includes(normalized) || normalized.includes(text));
+        });
+        return contained.length === 1 ? String(contained[0].id) : raw;
+      };
+      const byId = new Map(fill.map(item => [String(item.idx), dragItems.length ? dragAnswer(item.answer) : String(item.answer ?? '').trim()]));
       if (!blanks.length || blanks.some(blank => {
         const answer = byId.get(String(blank.idx));
         return !answer || (Array.isArray(dragOptions) && !dragOptions.includes(answer));

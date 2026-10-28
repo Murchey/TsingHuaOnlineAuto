@@ -920,6 +920,17 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
     return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
+  /** Wait until the challenge result modal closes, navigates, or changes text. */
+  private async waitChallengeClosed(modal: HTMLElement, beforeText: string, signal: AbortSignal): Promise<void> {
+    await until(() => {
+      const current = this.challengeModal();
+      return !current || current.modal !== modal || !document.contains(modal) || !shown(modal) ||
+        (modal.innerText || modal.textContent || '') !== beforeText ? true : undefined;
+    }, 20_000, signal);
+    // Continue calls the site's loadPage(); give the catalog/right arrow time to refresh.
+    await sleep(1_000, signal);
+  }
+
   private async transcribeQuestionAudio(c: LegacyComponent, audioIds: string[], settings: Settings,
     signal: AbortSignal): Promise<string> {
     if (!settings.asrApiKey.trim()) throw new Halt('ASR_CONFIG', '听力题需要 ASR：请先在面板填写 ASR API Key');
@@ -1190,7 +1201,7 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
   }
   private challengeModal(): { modal: HTMLElement; text: string } | null {
     const modal = [...document.querySelectorAll<HTMLElement>('.ant-modal-wrap')]
-      .find(el => shown(el) && /闯关|Rechallenge|Review/.test(el.innerText || el.textContent || ''));
+      .find(el => shown(el) && /闯关|Rechallenge|Review|Continue|继续/.test(el.innerText || el.textContent || ''));
     return modal ? { modal, text: modal.innerText || modal.textContent || '' } : null;
   }
   private goalFailure(): string | null {
@@ -1203,13 +1214,48 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
     beforeRechallenge?: () => void): Promise<Unit | undefined> {
     check(signal); this.assertContext(unit);
     this.visited.add(unit.key);
-    const failed = this.goalFailure();
-    if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
-    const successModal = this.challengeModal();
-    if (successModal && /闯关成功/.test(successModal.text)) {
-      this.rechallengeCounts.delete(unit.key);
-      successModal.modal.querySelector<HTMLElement>('.ant-modal-close')?.click();
-      await sleep(300, signal);
+    const modal = this.challengeModal();
+    if (modal) {
+      const continueButton = [...modal.modal.querySelectorAll<HTMLButtonElement>('button')]
+        .find(button => /^\s*(Continue|继续|继续闯关|继续学习)\s*$/i.test(button.textContent || '') && !button.disabled);
+      if (continueButton) {
+        // Continue is the site's primary action: closeChallengeModal(3/4) calls
+        // loadPage(), which refreshes the catalog and may unlock the next goal.
+        // Closing with .ant-modal-close is not equivalent and can leave the page stuck.
+        this.rechallengeCounts.delete(unit.key);
+        const beforeText = modal.text;
+        continueButton.click();
+        await this.waitChallengeClosed(modal.modal, beforeText, signal);
+        const moved = this.discover()[0];
+        if (moved && moved.key !== unit.key) { this.visited.add(moved.key); return moved; }
+        const failed = this.goalFailure();
+        if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
+      } else {
+        const failed = this.goalFailure();
+        if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
+        if (/闯关成功/.test(modal.text)) {
+          this.rechallengeCounts.delete(unit.key);
+          modal.modal.querySelector<HTMLElement>('.ant-modal-close')?.click();
+          await this.waitChallengeClosed(modal.modal, modal.text, signal);
+        }
+      }
+    }
+    // The course page also renders a first-party "继续学习" button in the breadcrumb
+    // when course.continueKey is set. It is separate from the challenge modal's
+    // Continue button and is the only way into the next task on some pages.
+    const continueStudy = [...document.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => shown(button) && !button.disabled && !button.classList.contains('dis-continue-btn') &&
+        !button.closest('.ant-modal-wrap') && /^\s*(继续学习|继续闯关|Continue)\s*$/i.test(button.textContent || ''));
+    if (continueStudy) {
+      const oldKey = unit.key;
+      continueStudy.click();
+      try {
+        const moved = await until(() => {
+          const candidate = this.discover()[0];
+          return candidate && candidate.key !== oldKey ? candidate : undefined;
+        }, 10_000, signal);
+        if (moved) { this.visited.add(moved.key); return moved; }
+      } catch { /* fall through to the right arrow or catalog */ }
     }
     const right = [...document.querySelectorAll<HTMLElement>('.page-next')].find(el =>
       !!el.querySelector('img[src*="tx_page_right"]') && shown(el));

@@ -59,6 +59,15 @@ describe('practice execution and recovery', () => {
     expect(reload).toHaveBeenCalledTimes(3);
     expect(c.logs.some(log => log.code === 'RELOAD_LIMIT')).toBe(true);
   });
+  it('requests an automatic reload and re-detect when the page changes mid-run', async () => {
+    const f = fakeAdapter(data(choice)), store = new Store(), reload = vi.fn();
+    f.adapter.load = vi.fn(async () => { throw new Halt('PAGE_CHANGED', '页面或课程发生变化'); });
+    const c = new Controller(f.adapter, store, lock, reload);
+    await c.start(f.unit, settings);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(c.logs.some(log => log.code === 'PAGE_CHANGED_RELOAD')).toBe(true);
+    expect(store.takeResume()).toBe(true);
+  });
   it('asks the model instead of pausing when a question has no parseable answer', async () => {
     const f = fakeAdapter(data({ ...fill, answer: '' }));
     vi.mocked(f.adapter.fill).mockImplementation(async (_u, task) => {

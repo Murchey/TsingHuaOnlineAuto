@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.4.0
+// @version      0.4.1
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -2443,6 +2443,14 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       }
       return (clone.innerText || clone.textContent || "").replace(/\s+/g, " ").trim();
     }
+    /** Wait until the challenge result modal closes, navigates, or changes text. */
+    async waitChallengeClosed(modal, beforeText, signal) {
+      await until(() => {
+        const current = this.challengeModal();
+        return !current || current.modal !== modal || !document.contains(modal) || !shown(modal) || (modal.innerText || modal.textContent || "") !== beforeText ? true : void 0;
+      }, 2e4, signal);
+      await sleep(1e3, signal);
+    }
     async transcribeQuestionAudio(c, audioIds, settings, signal) {
       if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "听力题需要 ASR：请先在面板填写 ASR API Key");
       const key2 = audioIds.join(",");
@@ -2696,7 +2704,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       buttons[0].click();
     }
     challengeModal() {
-      const modal = [...document.querySelectorAll(".ant-modal-wrap")].find((el) => shown(el) && /闯关|Rechallenge|Review/.test(el.innerText || el.textContent || ""));
+      const modal = [...document.querySelectorAll(".ant-modal-wrap")].find((el) => shown(el) && /闯关|Rechallenge|Review|Continue|继续/.test(el.innerText || el.textContent || ""));
       return modal ? { modal, text: modal.innerText || modal.textContent || "" } : null;
     }
     goalFailure() {
@@ -2709,13 +2717,46 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       check(signal);
       this.assertContext(unit);
       this.visited.add(unit.key);
-      const failed = this.goalFailure();
-      if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
-      const successModal = this.challengeModal();
-      if (successModal && /闯关成功/.test(successModal.text)) {
-        this.rechallengeCounts.delete(unit.key);
-        successModal.modal.querySelector(".ant-modal-close")?.click();
-        await sleep(300, signal);
+      const modal = this.challengeModal();
+      if (modal) {
+        const continueButton = [...modal.modal.querySelectorAll("button")].find((button) => /^\s*(Continue|继续|继续闯关|继续学习)\s*$/i.test(button.textContent || "") && !button.disabled);
+        if (continueButton) {
+          this.rechallengeCounts.delete(unit.key);
+          const beforeText = modal.text;
+          continueButton.click();
+          await this.waitChallengeClosed(modal.modal, beforeText, signal);
+          const moved = this.discover()[0];
+          if (moved && moved.key !== unit.key) {
+            this.visited.add(moved.key);
+            return moved;
+          }
+          const failed = this.goalFailure();
+          if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
+        } else {
+          const failed = this.goalFailure();
+          if (failed) return this.rechallenge(unit, signal, failed, settings, beforeRechallenge);
+          if (/闯关成功/.test(modal.text)) {
+            this.rechallengeCounts.delete(unit.key);
+            modal.modal.querySelector(".ant-modal-close")?.click();
+            await this.waitChallengeClosed(modal.modal, modal.text, signal);
+          }
+        }
+      }
+      const continueStudy = [...document.querySelectorAll("button")].find((button) => shown(button) && !button.disabled && !button.classList.contains("dis-continue-btn") && !button.closest(".ant-modal-wrap") && /^\s*(继续学习|继续闯关|Continue)\s*$/i.test(button.textContent || ""));
+      if (continueStudy) {
+        const oldKey2 = unit.key;
+        continueStudy.click();
+        try {
+          const moved = await until(() => {
+            const candidate = this.discover()[0];
+            return candidate && candidate.key !== oldKey2 ? candidate : void 0;
+          }, 1e4, signal);
+          if (moved) {
+            this.visited.add(moved.key);
+            return moved;
+          }
+        } catch {
+        }
       }
       const right = [...document.querySelectorAll(".page-next")].find((el) => !!el.querySelector('img[src*="tx_page_right"]') && shown(el));
       if (!right || right.getAttribute("aria-disabled") === "true" || right.classList.contains("disabled")) {
@@ -3022,9 +3063,14 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         if (signal.aborted) {
           const status = this.stopStatus;
           this.update({ status, message: status === "stopped" ? "已停止" : "已暂停，可继续重新核对" });
-        } else if (halt.code === "NEEDS_RELOAD") {
+        } else if (halt.code === "NEEDS_RELOAD" || halt.code === "PAGE_CHANGED" || halt.code === "STALE_PAGE") {
           if (this.store.requestResume()) {
-            this.report("RELOAD", "页面作答控件未渲染，正在自动刷新并继续", true);
+            const controlMissing = halt.code === "NEEDS_RELOAD";
+            this.report(
+              controlMissing ? "RELOAD" : "PAGE_CHANGED_RELOAD",
+              controlMissing ? "页面作答控件未渲染，正在自动刷新并继续" : "页面已切换，正在自动刷新并重新检测",
+              true
+            );
             this.reload();
           } else {
             this.update({ status: "paused" });
@@ -3211,7 +3257,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.4.0";
+      this.el("version").textContent = false ? "dev" : "0.4.1";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3421,7 +3467,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.4.0",
+        version: false ? "dev" : "0.4.1",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

@@ -104,11 +104,15 @@ export class Controller {
         const status = this.stopStatus as 'paused' | 'stopped';
         this.update({ status, message: status === 'stopped' ? '已停止' : '已暂停，可继续重新核对' });
       }
-      else if (halt.code === 'NEEDS_RELOAD') {
-        // The legacy page occasionally renders an exercise without its answer controls.
-        // A reload repairs it; the resume flag survives the navigation in sessionStorage.
+      else if (halt.code === 'NEEDS_RELOAD' || halt.code === 'PAGE_CHANGED' || halt.code === 'STALE_PAGE') {
+        // The legacy page occasionally renders an exercise without its answer controls, and
+        // Continue/next can replace the current Angular root without a full navigation.
+        // A reload repairs both; the resume flag survives in sessionStorage so the panel
+        // re-discovers the current unit and continues automatically.
         if (this.store.requestResume()) {
-          this.report('RELOAD', '页面作答控件未渲染，正在自动刷新并继续', true);
+          const controlMissing = halt.code === 'NEEDS_RELOAD';
+          this.report(controlMissing ? 'RELOAD' : 'PAGE_CHANGED_RELOAD',
+            controlMissing ? '页面作答控件未渲染，正在自动刷新并继续' : '页面已切换，正在自动刷新并重新检测', true);
           this.reload();
         } else {
           this.update({ status: 'paused' });

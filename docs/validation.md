@@ -123,7 +123,7 @@
 - 图片下载后按 PNG/JPEG/GIF/WebP 字节头识别 MIME，转 base64；最多随请求发送 4 张，单张上限 8 MB。请求格式与 MiMo 官方文档一致：`image_url: { url: "data:<mime>;base64,..." }`。
 - 听力+图片：先使用题目 `audioScript` 或 ASR 转写，再把转写、整页文本、选项/空位和图片一起交给多模态模型；提示词要求以图片中的文字和页面文本为准。
 - 图片解析或下载失败时提示模型“图片读取失败，只依据文本作答”，不暂停练习；若模型不支持图片并返回 HTTP 400/413/415/422，自动重试一次纯文本请求。
-- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 119 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
+- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 123 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
 - **待真实验收：** 在正式脚本管理器中用已配置的 MiMo 视觉模型（`mimo-v2.6-flash`/pro）对真实看图写话和听力+图片题各提交一次，确认模型实际读取了图片而非仅凭文本猜测。
 
 
@@ -151,3 +151,12 @@
 - 关键修正：只给空位 ID 和 `contentString` 时，单空题会把 First 填成最后一步；克隆叶子 DOM 并写入 `[[BLANK:<id>]]` 后，First 返回正确结果。
 - 自动验证：新增 video 数据收集/组合继承、视频 URL 解析与下载、视频音轨解码到 WAV、MiMo ASR 请求体、带空位原句提示等测试；`npm run check` 共 119 项通过。
 - **待真实验收：** 将 0.4.0 安装到脚本管理器后，在该题点击开始，确认 4 个空位写入并 Submit 成功。当前页面内等价 JS 流程已实测通过，但尚未通过正式 userscript 面板完成一次提交。
+
+
+## 0.4.1 Continue 按钮与 PAGE_CHANGED 自动恢复
+
+- 站点代码：挑战结果弹窗第二个按钮文本为 `score < fullScore && !lastScore ? "Review" : "Continue"`；点击 Continue 调用 `closeChallengeModal(3/4)`，父组件 `reChallengeChange(n)` 在 `n !== 1` 时执行 `courseStudyService.reChallenge.next(n)` 与 `loadPage()`。右上角关闭只发出 2，不能保证目录/下一关刷新，因此旧脚本只关闭弹窗会卡住。
+- 修复：`next()` 先检查可见挑战弹窗；存在 Continue/继续按钮时优先点击，等待弹窗关闭并留出 1 秒让 `loadPage()` 刷新，然后重新 `discover()`；若返回新 unit 直接继续，否则再走右箭头/目录树。失败弹窗只有 Continue 时不再错误寻找 Rechallenge。
+- PAGE_CHANGED：控制器现在把 `PAGE_CHANGED`/`STALE_PAGE` 与 `NEEDS_RELOAD` 一样处理，调用 `store.requestResume()` 后自动 `location.reload()`；面板恢复后重新检测当前练习并继续，最多 3 次，超过后显示 `RELOAD_LIMIT`。
+- 自动验证：新增“成功弹窗点击 Continue”“失败弹窗只有 Continue 时点击 Continue”“页面顶部继续学习按钮”“PAGE_CHANGED 自动刷新并续跑”四项用例；`npm run check` 共 122 项通过。
+- **待真实验收：** 更新 0.4.1 后，在真实闯关成功弹窗点击 Continue 的页面上确认自动进入下一关；当前代码级测试已覆盖按钮优先级与 PAGE_CHANGED 恢复。

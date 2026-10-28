@@ -1002,6 +1002,54 @@ describe('legacy production route regression', () => {
     expect(before).toHaveBeenCalledTimes(1);
     expect(next?.contentId).toBe('page-2');
   });
+  it('clicks Continue in a successful challenge modal instead of closing it', async () => {
+    const f = fixture();
+    const root2 = document.createElement('app-course-task-stu');
+    const c2: any = { courseId: 20, pageId: 'page-2', loadDoRecord() {} };
+    const modal = document.createElement('div');
+    modal.className = 'ant-modal-wrap';
+    modal.style.display = 'block';
+    modal.innerHTML = '<div class="ant-modal">闯关成功！<button>Rechallenge</button><button>Continue</button></div>';
+    document.body.append(modal);
+    const buttons = [...modal.querySelectorAll('button')];
+    const continueButton = buttons.find(button => button.textContent === 'Continue')!;
+    continueButton.addEventListener('click', () => { f.root.remove(); modal.remove(); document.body.append(root2); });
+    const adapter = new LegacyAdapter(() => [{ root: f.root, component: f.c },
+      { root: f.root.firstElementChild as HTMLElement, component: f.leaf }, { root: root2, component: c2 }]);
+    const unit = adapter.discover()[0];
+    const next = await adapter.next(unit, signal(), { ...defaults, autoRechallenge: true });
+    expect(next?.contentId).toBe('page-2');
+  });
+  it('clicks Continue on a failed challenge when the site offers no Rechallenge button', async () => {
+    const f = fixture();
+    const root2 = document.createElement('app-course-task-stu');
+    const c2: any = { courseId: 20, pageId: 'page-2', loadDoRecord() {} };
+    const modal = document.createElement('div');
+    modal.className = 'ant-modal-wrap';
+    modal.style.display = 'block';
+    modal.innerHTML = '<div class="ant-modal">闯关失败！本次成绩：55分<button>Continue</button></div>';
+    document.body.append(modal);
+    modal.querySelector('button')!.addEventListener('click', () => { f.root.remove(); modal.remove(); document.body.append(root2); });
+    const adapter = new LegacyAdapter(() => [{ root: f.root, component: f.c },
+      { root: f.root.firstElementChild as HTMLElement, component: f.leaf }, { root: root2, component: c2 }]);
+    const unit = adapter.discover()[0];
+    const next = await adapter.next(unit, signal(), { ...defaults, autoRechallenge: true });
+    expect(next?.contentId).toBe('page-2');
+  });
+  it('clicks the page-level 继续学习 button when the site provides it', async () => {
+    const f = fixture();
+    const root2 = document.createElement('app-course-task-stu');
+    const c2: any = { courseId: 20, pageId: 'page-2', loadDoRecord() {} };
+    const continueButton = document.createElement('button');
+    continueButton.textContent = '继续学习';
+    f.root.append(continueButton);
+    continueButton.addEventListener('click', () => { f.root.remove(); document.body.append(root2); });
+    const adapter = new LegacyAdapter(() => [{ root: f.root, component: f.c },
+      { root: f.root.firstElementChild as HTMLElement, component: f.leaf }, { root: root2, component: c2 }]);
+    const unit = adapter.discover()[0];
+    const next = await adapter.next(unit, signal());
+    expect(next?.contentId).toBe('page-2');
+  });
   it('refuses a closed course and stale exercise blocks', () => {
     const f = fixture(); f.c.status = 0;
     expect(() => f.adapter.assertContext(f.unit)).toThrow('开放课程');

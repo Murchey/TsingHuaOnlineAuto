@@ -1,11 +1,11 @@
 import { bounded, check, sleep, until } from './async';
 import { canonical, object, stable, text } from './answers';
 import { scoreWithChivox } from './chivox';
-import { answerWithAi, synthesizeSpeech, transcribeAudio } from './api';
+import { answerWithAi, fetchImage, synthesizeSpeech, transcribeAudio, type ImagePart } from './api';
 import { routePath, shown, TsinghuaAdapter } from './adapter';
 import { legacyComponents, runInLegacyZone, type LegacyComponent } from './legacy-angular';
 import { legacyData, legacyValue, richText, scriptFillAnswers } from './legacy-data';
-import { Halt, type Adapter, type ExerciseData, type Settings, type Task, type Unit } from './model';
+import { Halt, type Adapter, type ExerciseData, type Question, type Settings, type Task, type Unit } from './model';
 
 export function legacyRoute(): boolean {
   return /^\/legacy\/course-study-student\/\d+\/\d+\/\d+\/[\w-]+\/?$/.test(routePath());
@@ -14,6 +14,7 @@ export function legacyRoute(): boolean {
 export class LegacyAdapter implements Adapter {
   private rechallengeCounts = new Map<string, number>();
   private visited = new Set<string>();
+  private transcripts = new Map<string, string>();
   constructor(private components = legacyComponents) {}
   discover(): Unit[] {
     if (!legacyRoute()) return [];
@@ -242,7 +243,7 @@ export class LegacyAdapter implements Adapter {
     await this.ready(unit, signal);
     const { component: c, root } = await this.leafOrReload(unit, task, signal);
     if (![8, 9, 18, 20].includes(Number(c.exercise.type))) throw new Halt('UNSUPPORTED', '此旧版评测题尚未适配，请手动作答');
-    if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c);
+    if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c, root);
     if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
     if (Number(c.exercise.type) === 18) return this.recordRolePlayTts(unit, task, settings, signal, c);
     if (!navigator.mediaDevices?.getUserMedia) throw new Halt('MICROPHONE', '浏览器未提供麦克风');
@@ -275,7 +276,7 @@ export class LegacyAdapter implements Adapter {
     }
   }
   private async recordOralBrief(unit: Unit, task: Task, settings: Settings, signal: AbortSignal,
-    c: LegacyComponent): Promise<unknown> {
+    c: LegacyComponent, root: HTMLElement): Promise<unknown> {
     const q = task.question;
     let answer = typeof q.answer === 'string' ? q.answer.trim() : '';
     if (settings.aiAnswers) {
@@ -287,12 +288,15 @@ export class LegacyAdapter implements Adapter {
         try { transcript = await this.transcribeQuestionAudio(c, q.audio, settings, signal); }
         catch (error) { if (error instanceof Halt && error.code === 'CANCELLED') throw error; }
       }
+      const aiImages = await this.aiImages(q, root, c, settings, signal);
       const prompt = `你是英语口语考试助手。请根据题目写一个自然、简洁、适合朗读的英语回答，2-4 句。只返回 JSON：{"answer":"..."}。
 题目: ${q.instruction || q.stem || ''}
 页面文本:
 ${(q.stem || '').slice(0, 3000)}
-听力转写: ${transcript || '（无）'}`;
-      const result = object(await answerWithAi(prompt, settings, signal));
+听力转写: ${transcript || '（无）'}
+${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题目图片，请根据图片内容作答。` : ''}`;
+      const result = object(aiImages.images.length ? await answerWithAi(prompt, settings, signal, aiImages.images) :
+        await answerWithAi(prompt, settings, signal));
       answer = typeof result.answer === 'string' ? result.answer.trim() : '';
       if (!answer) throw new Halt('AI_ANSWER', 'AI 没有返回口语简答题答案');
     }
@@ -669,6 +673,10 @@ ${(q.stem || '').slice(0, 3000)}
     }) : [];
     // The legacy listening exercises expose their script; ASR is only a fallback.
     const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : '');
+    // Pictures are rendered by the exercise wrapper (or a shared composite block), so they
+    // must be collected from the page DOM before the prompt is built. Failure to read an
+    // image degrades to text-only instead of blocking an otherwise answerable question.
+    const aiImages = await this.aiImages(q, root, c, settings, signal);
     const options = Array.isArray(q.extension) ? q.extension.map(option => ({
       id: String(object(option).idx), text: text(object(option).val),
     })) : [];
@@ -707,6 +715,8 @@ ${matching ? `匹配目标: ${JSON.stringify(matching.targets)}
 ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ''}
 听力转写: ${transcript || '（无）'}
+${aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` :
+  (aiImages.expected ? '图片: 本题含图片，但图片读取失败；请只依据文本作答。' : '')}
 返回格式: ${schema}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填空的 answer 必须使用选项中的 ID。' : ''}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 19 ? '对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。' : ''}
@@ -715,7 +725,17 @@ ${Number(ext.legacyType) === 22 ? '判断题每条句子必须选择一个判断
 ${Number(ext.legacyType) === 10 ? '匹配题每个目标必须且只能选一个匹配项，每个选项只能用一次，全部目标都要分配。' : ''}
 ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。' : ''}
 必须严格回答当前题目。`;
-    const result = await answerWithAi(prompt, settings, signal);
+    let result: unknown;
+    try {
+      result = aiImages.images.length ? await answerWithAi(prompt, settings, signal, aiImages.images) :
+        await answerWithAi(prompt, settings, signal);
+    } catch (error) {
+      // A non-vision model rejects image parts. Retry text-only so a text-answerable
+      // question is not lost; vision-capable models (MiMo v2.6) keep the images.
+      if (!aiImages.images.length || !(error instanceof Halt) || error.code !== 'API_ERROR' ||
+          !/HTTP (400|413|415|422)/.test(error.message)) throw error;
+      result = await answerWithAi(prompt + '\n（当前 AI 接口未接受图片，请仅根据文字作答。）', settings, signal);
+    }
     try { return { ...task, value: this.validateAiValue(task, result) }; }
     catch (error) {
       // Judge answers are often written as T/F/NI text; retry once with the allowed ids
@@ -725,16 +745,102 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
           const entry = object(option);
           return { id: String(entry.id), text: String(entry.text ?? '') };
         });
-        const retry = await answerWithAi(`${prompt}\n\n上一次返回不符合要求：${JSON.stringify(result).slice(0, 800)}\n只能使用这些选项 id：${JSON.stringify(allowed)}\n请重新返回 {"fill":[{"idx":"句子ID","answer":"选项ID"}]}。`,
-          settings, signal);
+        const retryPrompt = `${prompt}\n\n上一次返回不符合要求：${JSON.stringify(result).slice(0, 800)}\n只能使用这些选项 id：${JSON.stringify(allowed)}\n请重新返回 {"fill":[{"idx":"句子ID","answer":"选项ID"}]}。`;
+        const retry = aiImages.images.length ? await answerWithAi(retryPrompt, settings, signal, aiImages.images) :
+          await answerWithAi(retryPrompt, settings, signal);
         return { ...task, value: this.validateAiValue(task, retry) };
       }
       throw error;
     }
   }
+  /** Collect exercise-level images. The legacy wrapper renders them outside the leaf component. */
+  private imageSources(question: Question, root: HTMLElement): string[] {
+    const urls: string[] = [];
+    const add = (raw: string | null | undefined): void => {
+      const value = raw?.trim();
+      if (!value || /^assets\//i.test(value) || /assets\/img\/default/i.test(value)) return;
+      if (!/^(https?:\/\/|data:image\/|blob:)/i.test(value)) return;
+      try {
+        const url = new URL(value, location.href).href;
+        if (!urls.includes(url)) urls.push(url);
+      } catch { /* ignore malformed source */ }
+    };
+    let scope: HTMLElement | null = root;
+    while (scope) {
+      const images = [...scope.querySelectorAll<HTMLImageElement>('lib-exercise-res-show .show-img img')];
+      if (images.length) {
+        for (const image of images) add(image.currentSrc || image.src || image.getAttribute('src'));
+        break;
+      }
+      if (scope.matches('app-course-task-stu')) break;
+      scope = scope.parentElement;
+    }
+    if (!urls.length) {
+      // Rich-text instructions sometimes carry an inline picture instead of exercise.image.
+      let cursor: HTMLElement | null = root;
+      while (cursor) {
+        for (const image of cursor.querySelectorAll<HTMLImageElement>('img')) {
+          const width = image.naturalWidth || Number(image.getAttribute('width')) || 0;
+          const height = image.naturalHeight || Number(image.getAttribute('height')) || 0;
+          if (width >= 120 && height >= 80) add(image.currentSrc || image.src || image.getAttribute('src'));
+        }
+        if (urls.length || cursor.matches('app-course-task-stu')) break;
+        cursor = cursor.parentElement;
+      }
+    }
+    // Prefer pictures that actually rendered. Resource ids remain the fallback when the
+    // wrapper has not mounted its img yet (or the DOM is unavailable in tests).
+    return (urls.length ? urls : (question.images || [])).slice(0, 6);
+  }
+
+  private async resolveImageUrl(c: LegacyComponent, source: string, settings: Settings,
+    signal: AbortSignal): Promise<string> {
+    if (/^(https?:\/\/|data:image\/|blob:)/i.test(source)) return source;
+    const service = c.getWebUrlService ?? c.webUrlService ??
+      this.components().map(({ component }) => component.getWebUrlService ?? component.webUrlService)
+        .find(value => typeof value?.getResUrl === 'function');
+    const resolved = typeof service?.getResUrl === 'function' ? service.getResUrl(source, 3) : undefined;
+    if (typeof resolved?.subscribe !== 'function') throw new Halt('IMAGE_RESOLVE', '页面未提供图片解析服务');
+    let subscription: { unsubscribe(): void } | undefined;
+    try {
+      const response = await bounded(new Promise<unknown>((resolve, reject) => {
+        subscription = resolved.subscribe({ next: resolve, error: reject });
+      }), settings.timeoutMs, signal);
+      const url = object(response).url;
+      if (typeof url === 'string' && url.trim()) return new URL(url, location.href).href;
+      throw new Halt('IMAGE_RESOLVE', '图片地址为空');
+    } finally { subscription?.unsubscribe(); }
+  }
+
+  private async aiImages(question: Question, root: HTMLElement, c: LegacyComponent, settings: Settings,
+    signal: AbortSignal): Promise<{ images: ImagePart[]; expected: number }> {
+    const sources = this.imageSources(question, root);
+    const images: ImagePart[] = [], seen = new Set<string>();
+    for (const source of sources) {
+      check(signal);
+      let url = source;
+      try { url = await this.resolveImageUrl(c, source, settings, signal); }
+      catch (error) {
+        if (error instanceof Halt && error.code === 'CANCELLED') throw error;
+        continue;
+      }
+      try {
+        const part = await fetchImage(url, settings, signal);
+        if (part && !seen.has(part.data)) { seen.add(part.data); images.push(part); }
+      } catch (error) {
+        if (signal.aborted) throw error;
+      }
+      if (images.length >= 4) break;
+    }
+    return { images, expected: sources.length };
+  }
+
   private async transcribeQuestionAudio(c: LegacyComponent, audioIds: string[], settings: Settings,
     signal: AbortSignal): Promise<string> {
     if (!settings.asrApiKey.trim()) throw new Halt('ASR_CONFIG', '听力题需要 ASR：请先在面板填写 ASR API Key');
+    const key = audioIds.join(',');
+    const cached = this.transcripts.get(key);
+    if (cached) return cached;
     const transcripts: string[] = [];
     for (let index = 0; index < audioIds.length; index++) {
       const url = await this.resolveAudioUrl(c, { id: `audio-${index}`, audio: audioIds[index] }, settings, signal);
@@ -750,7 +856,12 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
       }
       transcripts.push(await transcribeAudio(audio, `question-${index}.mp3`, settings, signal));
     }
-    return [...new Set(transcripts.filter(Boolean))].join('\n');
+    const result = [...new Set(transcripts.filter(Boolean))].join('\n');
+    // Composite pages may give the same parent audio to several child questions; one
+    // transcription per audio set avoids repeated API calls and inconsistent prompts.
+    if (this.transcripts.size >= 100) this.transcripts.clear();
+    this.transcripts.set(key, result);
+    return result;
   }
   private validateAiValue(task: Task, value: unknown): unknown {
     const result = object(value), q = task.question;

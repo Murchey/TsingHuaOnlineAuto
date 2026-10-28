@@ -38,6 +38,8 @@ type 8 实际为 `LIB-ORAL-BRIEF-EXERCISE-CS-STUDY` 口语简答，不是 textar
 - 站点重置某关答案但保留 `submitNum`（服务器上没有任何完整作答）时，已校验 checkpoint 会自动清理并重新作答；服务器记录完全消失仍以 `RECORD_CHANGED` 暂停。
 - MiMo ASR 使用 `/chat/completions`，user content 仅含 `input_audio`；OpenAI 兼容 ASR 仍走 multipart `/audio/transcriptions`。
 
+0.3.8 处理看图写话与听力+图片：旧版 `exercise.image` 是逗号分隔的资源 ID，页面渲染为 `lib-exercise-res-show > .show-img > img`。适配器从叶子作答组件向上找到最近的含图包装层，优先收集已渲染图片的绝对 URL；没有 DOM 图片时才回退到资源 ID，并用 `getResUrl(id, 3)` 解析。图片下载后按字节识别 MIME、转 base64，按 OpenAI/MiMo 兼容的 `image_url: { url: "data:<mime>;base64,..." }` 发送，最多 4 张。听力题仍先 ASR（或使用题目 `audioScript`），再把转写、整页文本和图片一起交给模型；图片读取失败只提示模型按文本作答，不暂停整块练习。
+
 ## 新版 Vue
 
 公开首页及其第一方资源：`/assets/textbook-reader-BwTC3IPT.js`、`/assets/src-CRr8PyXj.js`、`/assets/router-l05bPN5G.js`、`/assets/runtime-core.esm-bundler-DDWTrPxX.js`。文件名可能变化。

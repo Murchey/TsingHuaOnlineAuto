@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { answerWithAi, synthesizeSpeech, transcribeAudio } from '../src/api';
+import { answerWithAi, fetchImage, synthesizeSpeech, transcribeAudio } from '../src/api';
 import { defaults, type Settings } from '../src/model';
 
 const signal = () => new AbortController().signal;
@@ -58,6 +58,36 @@ it('uses MiMo chat-completions ASR with an input_audio part', async () => {
   const body = JSON.parse(calls[0].data);
   expect(body.model).toBe('mimo-v2.5-asr');
   expect(body.messages[0].content[0]).toMatchObject({ type: 'input_audio', input_audio: { format: 'mp3', data: 'AQID' } });
+});
+it('sends exercise images as OpenAI-compatible multimodal data URIs', async () => {
+  const calls: any[] = [];
+  vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
+    calls.push(details);
+    details.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: '{"answer":"from image"}' } }] }) });
+    return { abort: vi.fn() };
+  });
+  await expect(answerWithAi('look at the picture', cfg({ aiApiKey: 'k' }), signal(),
+    [{ mime: 'image/png', data: 'AAAA' }])).resolves.toEqual({ answer: 'from image' });
+  const user = JSON.parse(calls[0].data).messages[1];
+  expect(user.content[0]).toEqual({ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } });
+  expect(user.content[1]).toEqual({ type: 'text', text: 'look at the picture' });
+});
+it('downloads an exercise image and sniffs its MIME type from the bytes', async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).buffer, calls: any[] = [];
+  vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
+    calls.push(details); details.onload({ status: 200, response: png }); return { abort: vi.fn() };
+  });
+  const image = await fetchImage('https://cdn.example/picture', cfg(), signal());
+  expect(image?.mime).toBe('image/png');
+  expect(image?.data).toBe(Buffer.from(new Uint8Array(png)).toString('base64'));
+  expect(calls[0]).toMatchObject({ method: 'GET', responseType: 'arraybuffer' });
+});
+it('accepts an inline data URI image without a network request', async () => {
+  const gm = vi.fn();
+  vi.stubGlobal('GM_xmlhttpRequest', gm);
+  await expect(fetchImage('data:image/jpeg;base64,QUJD', cfg(), signal()))
+    .resolves.toEqual({ mime: 'image/jpeg', data: 'QUJD' });
+  expect(gm).not.toHaveBeenCalled();
 });
 it('falls back to fetch when the userscript manager lacks GM_xmlhttpRequest', async () => {
   const fetchMock = vi.fn(async () => ({ ok: true, status: 200,

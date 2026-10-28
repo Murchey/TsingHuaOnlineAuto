@@ -6,6 +6,8 @@ export function legacyQuestion(exercise: unknown): Question {
   const q: Question = { id: String(e.id || ''), type: `legacy_${type}`, instruction: String(e.contentString || '') };
   const audio = collectAudioIds(e);
   if (audio.length) q.audio = audio;
+  const images = collectImageIds(e);
+  if (images.length) q.images = images;
   if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
     // Composite listening blocks keep the script on the parent; children need it too so
     // the AI can answer without a slow or failing ASR round-trip.
@@ -16,6 +18,9 @@ export function legacyQuestion(exercise: unknown): Question {
       if (parentScript && question.extension && !Array.isArray(question.extension)) {
         question.extension = { ...ext, audioScript: parentScript };
       }
+      // Composite pages render one shared audio/picture above all child exercises.
+      if (q.audio?.length) question.audio = [...new Set([...(question.audio || []), ...q.audio])];
+      if (q.images?.length) question.images = [...new Set([...(question.images || []), ...q.images])];
       return question;
     });
     return q;
@@ -148,6 +153,33 @@ function arrayField(e: Record<string, unknown>, ...keys: string[]): unknown[] {
     if (found.length) return found;
   }
   return [];
+}
+
+function imageTokens(value: unknown): string[] {
+  if (typeof value === 'string') return value.split(',').map(item => item.trim()).filter(Boolean);
+  if (Array.isArray(value)) return value.flatMap(imageTokens);
+  if (!value || typeof value !== 'object') return [];
+  const entry = object(value), out: string[] = [];
+  for (const key of ['id', 'resId', 'resourceID', 'resourceId', 'image', 'imageUrl', 'url', 'previewPath', 'path']) {
+    out.push(...imageTokens(entry[key]));
+  }
+  return out;
+}
+
+function collectImageIds(e: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const key of ['image', 'images', 'imageList', 'picture', 'pictures', 'img', 'imgList']) {
+    out.push(...imageTokens(e[key]));
+  }
+  // Image-based choice questions keep the picture on each alternative.
+  for (const key of ['alternative', 'alternatives', 'options', 'choices']) {
+    const list = Array.isArray(e[key]) ? e[key] as unknown[] : [];
+    for (const item of list) {
+      const entry = object(item);
+      out.push(...imageTokens(entry.image), ...imageTokens(entry.images));
+    }
+  }
+  return [...new Set(out.filter(item => item.length > 0 && item.length <= 400))];
 }
 
 function collectAudioIds(value: unknown): string[] {

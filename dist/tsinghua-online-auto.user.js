@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.7
+// @version      0.3.8
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -937,14 +937,45 @@
     return decodeBase64(data);
   }
   var SYSTEM = "你是英语课程作答助手。只返回一个 JSON 对象，不要 Markdown、解释或额外文字。严格使用题目提供的选项 ID 和空位 ID。";
-  async function answerWithAi(prompt, settings, signal) {
+  var MAX_AI_IMAGE_BYTES = 8e6;
+  function imageMime(buffer, url) {
+    const b = new Uint8Array(buffer);
+    if (b.length >= 8 && b[0] === 137 && b[1] === 80 && b[2] === 78 && b[3] === 71) return "image/png";
+    if (b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255) return "image/jpeg";
+    if (b.length >= 6 && b[0] === 71 && b[1] === 73 && b[2] === 70) return "image/gif";
+    if (b.length >= 12 && b[0] === 82 && b[1] === 73 && b[2] === 70 && b[3] === 70 && b[8] === 87 && b[9] === 69 && b[10] === 66 && b[11] === 80) return "image/webp";
+    if (/\.png(?:\?|$)/i.test(url)) return "image/png";
+    if (/\.webp(?:\?|$)/i.test(url)) return "image/webp";
+    if (/\.gif(?:\?|$)/i.test(url)) return "image/gif";
+    return "image/jpeg";
+  }
+  async function fetchImage(url, settings, signal) {
+    const inline = /^data:(image\/[\w.+-]+);base64,([\s\S]+)$/i.exec(url);
+    if (inline) return inline[2].length * 3 / 4 > MAX_AI_IMAGE_BYTES ? void 0 : { mime: inline[1].toLowerCase(), data: inline[2].replace(/\s+/g, "") };
+    try {
+      const response = await request({ url, method: "GET", responseType: "arraybuffer" }, settings, signal);
+      const buffer = response.response;
+      if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength || buffer.byteLength > MAX_AI_IMAGE_BYTES) return void 0;
+      return { mime: imageMime(buffer, url), data: encodeBase64(buffer) };
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return void 0;
+    }
+  }
+  async function answerWithAi(prompt, settings, signal, images = []) {
     if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "请在面板填写 AI API Key");
     const response = await request({
       url: endpoint(settings.aiApiBase, "/chat/completions"),
       headers: authHeaders(settings.aiApiKey),
       data: JSON.stringify({ model: settings.aiModel, messages: [
         { role: "system", content: SYSTEM },
-        { role: "user", content: prompt }
+        { role: "user", content: images.length ? [
+          ...images.map((image) => ({
+            type: "image_url",
+            image_url: { url: `data:${image.mime};base64,${image.data}` }
+          })),
+          { type: "text", text: prompt }
+        ] : prompt }
       ], temperature: 0.2, stream: false })
     }, settings, signal);
     const parsed = JSON.parse(response.responseText || "{}");
@@ -1036,6 +1067,8 @@
     const q = { id: String(e.id || ""), type: `legacy_${type}`, instruction: String(e.contentString || "") };
     const audio = collectAudioIds(e);
     if (audio.length) q.audio = audio;
+    const images = collectImageIds(e);
+    if (images.length) q.images = images;
     if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
       const parentScript = text(typeof e.audioScript === "string" ? e.audioScript : "");
       q.children = e.exerciseList.map((child) => {
@@ -1044,6 +1077,8 @@
         if (parentScript && question.extension && !Array.isArray(question.extension)) {
           question.extension = { ...ext, audioScript: parentScript };
         }
+        if (q.audio?.length) question.audio = [.../* @__PURE__ */ new Set([...question.audio || [], ...q.audio])];
+        if (q.images?.length) question.images = [.../* @__PURE__ */ new Set([...question.images || [], ...q.images])];
         return question;
       });
       return q;
@@ -1187,6 +1222,30 @@
       if (found.length) return found;
     }
     return [];
+  }
+  function imageTokens(value) {
+    if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
+    if (Array.isArray(value)) return value.flatMap(imageTokens);
+    if (!value || typeof value !== "object") return [];
+    const entry = object(value), out = [];
+    for (const key2 of ["id", "resId", "resourceID", "resourceId", "image", "imageUrl", "url", "previewPath", "path"]) {
+      out.push(...imageTokens(entry[key2]));
+    }
+    return out;
+  }
+  function collectImageIds(e) {
+    const out = [];
+    for (const key2 of ["image", "images", "imageList", "picture", "pictures", "img", "imgList"]) {
+      out.push(...imageTokens(e[key2]));
+    }
+    for (const key2 of ["alternative", "alternatives", "options", "choices"]) {
+      const list = Array.isArray(e[key2]) ? e[key2] : [];
+      for (const item of list) {
+        const entry = object(item);
+        out.push(...imageTokens(entry.image), ...imageTokens(entry.images));
+      }
+    }
+    return [...new Set(out.filter((item) => item.length > 0 && item.length <= 400))];
   }
   function collectAudioIds(value) {
     const out = [], seen = /* @__PURE__ */ new Set(), queue = [value];
@@ -1367,6 +1426,7 @@
     }
     rechallengeCounts = /* @__PURE__ */ new Map();
     visited = /* @__PURE__ */ new Set();
+    transcripts = /* @__PURE__ */ new Map();
     discover() {
       if (!legacyRoute()) return [];
       return this.components().filter(({ component: c, root }) => root.matches("app-course-task-stu") && shown(root) && root.isConnected && typeof c.loadDoRecord === "function" && /^[\w-]+$/.test(String(c.pageId || ""))).map(({ component: c, root }) => ({
@@ -1605,7 +1665,7 @@
       await this.ready(unit, signal);
       const { component: c, root } = await this.leafOrReload(unit, task, signal);
       if (![8, 9, 18, 20].includes(Number(c.exercise.type))) throw new Halt("UNSUPPORTED", "此旧版评测题尚未适配，请手动作答");
-      if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c);
+      if (Number(c.exercise.type) === 8) return this.recordOralBrief(unit, task, settings, signal, c, root);
       if (Number(c.exercise.type) === 9) return this.recordRolePlay(unit, task, settings, signal, c, root);
       if (Number(c.exercise.type) === 18) return this.recordRolePlayTts(unit, task, settings, signal, c);
       if (!navigator.mediaDevices?.getUserMedia) throw new Halt("MICROPHONE", "浏览器未提供麦克风");
@@ -1648,7 +1708,7 @@
         }
       }
     }
-    async recordOralBrief(unit, task, settings, signal, c) {
+    async recordOralBrief(unit, task, settings, signal, c, root) {
       const q = task.question;
       let answer = typeof q.answer === "string" ? q.answer.trim() : "";
       if (settings.aiAnswers) {
@@ -1661,12 +1721,14 @@
             if (error instanceof Halt && error.code === "CANCELLED") throw error;
           }
         }
+        const aiImages = await this.aiImages(q, root, c, settings, signal);
         const prompt = `你是英语口语考试助手。请根据题目写一个自然、简洁、适合朗读的英语回答，2-4 句。只返回 JSON：{"answer":"..."}。
 题目: ${q.instruction || q.stem || ""}
 页面文本:
 ${(q.stem || "").slice(0, 3e3)}
-听力转写: ${transcript || "（无）"}`;
-        const result = object(await answerWithAi(prompt, settings, signal));
+听力转写: ${transcript || "（无）"}
+${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题目图片，请根据图片内容作答。` : ""}`;
+        const result = object(aiImages.images.length ? await answerWithAi(prompt, settings, signal, aiImages.images) : await answerWithAi(prompt, settings, signal));
         answer = typeof result.answer === "string" ? result.answer.trim() : "";
         if (!answer) throw new Halt("AI_ANSWER", "AI 没有返回口语简答题答案");
       }
@@ -2037,6 +2099,7 @@ ${(q.stem || "").slice(0, 3e3)}
         return `${String(entry.role || "")}: ${String(entry.text || "")}`;
       }) : [];
       const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : "");
+      const aiImages = await this.aiImages(q, root, c, settings, signal);
       const options = Array.isArray(q.extension) ? q.extension.map((option) => ({
         id: String(object(option).idx),
         text: text(object(option).val)
@@ -2072,6 +2135,7 @@ ${matching ? `匹配目标: ${JSON.stringify(matching.targets)}
 ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ""}
 听力转写: ${transcript || "（无）"}
+${aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` : aiImages.expected ? "图片: 本题含图片，但图片读取失败；请只依据文本作答。" : ""}
 返回格式: ${schema}
 ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空的 answer 必须使用选项中的 ID。" : ""}
 ${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
@@ -2080,7 +2144,13 @@ ${Number(ext.legacyType) === 22 ? "判断题每条句子必须选择一个判断
 ${Number(ext.legacyType) === 10 ? "匹配题每个目标必须且只能选一个匹配项，每个选项只能用一次，全部目标都要分配。" : ""}
 ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。" : ""}
 必须严格回答当前题目。`;
-      const result = await answerWithAi(prompt, settings, signal);
+      let result;
+      try {
+        result = aiImages.images.length ? await answerWithAi(prompt, settings, signal, aiImages.images) : await answerWithAi(prompt, settings, signal);
+      } catch (error) {
+        if (!aiImages.images.length || !(error instanceof Halt) || error.code !== "API_ERROR" || !/HTTP (400|413|415|422)/.test(error.message)) throw error;
+        result = await answerWithAi(prompt + "\n（当前 AI 接口未接受图片，请仅根据文字作答。）", settings, signal);
+      }
       try {
         return { ...task, value: this.validateAiValue(task, result) };
       } catch (error) {
@@ -2089,22 +2159,101 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
             const entry = object(option);
             return { id: String(entry.id), text: String(entry.text ?? "") };
           });
-          const retry = await answerWithAi(
-            `${prompt}
+          const retryPrompt = `${prompt}
 
 上一次返回不符合要求：${JSON.stringify(result).slice(0, 800)}
 只能使用这些选项 id：${JSON.stringify(allowed)}
-请重新返回 {"fill":[{"idx":"句子ID","answer":"选项ID"}]}。`,
-            settings,
-            signal
-          );
+请重新返回 {"fill":[{"idx":"句子ID","answer":"选项ID"}]}。`;
+          const retry = aiImages.images.length ? await answerWithAi(retryPrompt, settings, signal, aiImages.images) : await answerWithAi(retryPrompt, settings, signal);
           return { ...task, value: this.validateAiValue(task, retry) };
         }
         throw error;
       }
     }
+    /** Collect exercise-level images. The legacy wrapper renders them outside the leaf component. */
+    imageSources(question, root) {
+      const urls = [];
+      const add = (raw) => {
+        const value = raw?.trim();
+        if (!value || /^assets\//i.test(value) || /assets\/img\/default/i.test(value)) return;
+        if (!/^(https?:\/\/|data:image\/|blob:)/i.test(value)) return;
+        try {
+          const url = new URL(value, location.href).href;
+          if (!urls.includes(url)) urls.push(url);
+        } catch {
+        }
+      };
+      let scope = root;
+      while (scope) {
+        const images = [...scope.querySelectorAll("lib-exercise-res-show .show-img img")];
+        if (images.length) {
+          for (const image of images) add(image.currentSrc || image.src || image.getAttribute("src"));
+          break;
+        }
+        if (scope.matches("app-course-task-stu")) break;
+        scope = scope.parentElement;
+      }
+      if (!urls.length) {
+        let cursor = root;
+        while (cursor) {
+          for (const image of cursor.querySelectorAll("img")) {
+            const width = image.naturalWidth || Number(image.getAttribute("width")) || 0;
+            const height = image.naturalHeight || Number(image.getAttribute("height")) || 0;
+            if (width >= 120 && height >= 80) add(image.currentSrc || image.src || image.getAttribute("src"));
+          }
+          if (urls.length || cursor.matches("app-course-task-stu")) break;
+          cursor = cursor.parentElement;
+        }
+      }
+      return (urls.length ? urls : question.images || []).slice(0, 6);
+    }
+    async resolveImageUrl(c, source, settings, signal) {
+      if (/^(https?:\/\/|data:image\/|blob:)/i.test(source)) return source;
+      const service = c.getWebUrlService ?? c.webUrlService ?? this.components().map(({ component }) => component.getWebUrlService ?? component.webUrlService).find((value) => typeof value?.getResUrl === "function");
+      const resolved = typeof service?.getResUrl === "function" ? service.getResUrl(source, 3) : void 0;
+      if (typeof resolved?.subscribe !== "function") throw new Halt("IMAGE_RESOLVE", "页面未提供图片解析服务");
+      let subscription;
+      try {
+        const response = await bounded(new Promise((resolve, reject) => {
+          subscription = resolved.subscribe({ next: resolve, error: reject });
+        }), settings.timeoutMs, signal);
+        const url = object(response).url;
+        if (typeof url === "string" && url.trim()) return new URL(url, location.href).href;
+        throw new Halt("IMAGE_RESOLVE", "图片地址为空");
+      } finally {
+        subscription?.unsubscribe();
+      }
+    }
+    async aiImages(question, root, c, settings, signal) {
+      const sources = this.imageSources(question, root);
+      const images = [], seen = /* @__PURE__ */ new Set();
+      for (const source of sources) {
+        check(signal);
+        let url = source;
+        try {
+          url = await this.resolveImageUrl(c, source, settings, signal);
+        } catch (error) {
+          if (error instanceof Halt && error.code === "CANCELLED") throw error;
+          continue;
+        }
+        try {
+          const part = await fetchImage(url, settings, signal);
+          if (part && !seen.has(part.data)) {
+            seen.add(part.data);
+            images.push(part);
+          }
+        } catch (error) {
+          if (signal.aborted) throw error;
+        }
+        if (images.length >= 4) break;
+      }
+      return { images, expected: sources.length };
+    }
     async transcribeQuestionAudio(c, audioIds, settings, signal) {
       if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "听力题需要 ASR：请先在面板填写 ASR API Key");
+      const key2 = audioIds.join(",");
+      const cached = this.transcripts.get(key2);
+      if (cached) return cached;
       const transcripts = [];
       for (let index = 0; index < audioIds.length; index++) {
         const url = await this.resolveAudioUrl(c, { id: `audio-${index}`, audio: audioIds[index] }, settings, signal);
@@ -2120,7 +2269,10 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         }
         transcripts.push(await transcribeAudio(audio, `question-${index}.mp3`, settings, signal));
       }
-      return [...new Set(transcripts.filter(Boolean))].join("\n");
+      const result = [...new Set(transcripts.filter(Boolean))].join("\n");
+      if (this.transcripts.size >= 100) this.transcripts.clear();
+      this.transcripts.set(key2, result);
+      return result;
     }
     validateAiValue(task, value) {
       const result = object(value), q = task.question;
@@ -2798,7 +2950,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.7";
+      this.el("version").textContent = false ? "dev" : "0.3.8";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3008,7 +3160,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.7",
+        version: false ? "dev" : "0.3.8",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

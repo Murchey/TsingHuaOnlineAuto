@@ -134,12 +134,49 @@ export async function synthesizeSpeech(text: string, settings: Settings, signal:
 
 const SYSTEM = '你是英语课程作答助手。只返回一个 JSON 对象，不要 Markdown、解释或额外文字。严格使用题目提供的选项 ID 和空位 ID。';
 
-export async function answerWithAi(prompt: string, settings: Settings, signal: AbortSignal): Promise<unknown> {
+export interface ImagePart { mime: string; data: string }
+export const MAX_AI_IMAGE_BYTES = 8_000_000;
+
+function imageMime(buffer: ArrayBuffer, url: string): string {
+  const b = new Uint8Array(buffer);
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  if (/\.png(?:\?|$)/i.test(url)) return 'image/png';
+  if (/\.webp(?:\?|$)/i.test(url)) return 'image/webp';
+  if (/\.gif(?:\?|$)/i.test(url)) return 'image/gif';
+  return 'image/jpeg';
+}
+
+/** Download an exercise image and return base64 for a multimodal chat request. */
+export async function fetchImage(url: string, settings: Settings, signal: AbortSignal): Promise<ImagePart | undefined> {
+  const inline = /^data:(image\/[\w.+-]+);base64,([\s\S]+)$/i.exec(url);
+  if (inline) return inline[2].length * 3 / 4 > MAX_AI_IMAGE_BYTES ? undefined :
+    { mime: inline[1].toLowerCase(), data: inline[2].replace(/\s+/g, '') };
+  try {
+    const response = await request({ url, method: 'GET', responseType: 'arraybuffer' }, settings, signal);
+    const buffer = response.response;
+    if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength || buffer.byteLength > MAX_AI_IMAGE_BYTES) return undefined;
+    return { mime: imageMime(buffer, url), data: encodeBase64(buffer) };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return undefined;
+  }
+}
+
+export async function answerWithAi(prompt: string, settings: Settings, signal: AbortSignal,
+  images: ImagePart[] = []): Promise<unknown> {
   if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '请在面板填写 AI API Key');
   const response = await request({
     url: endpoint(settings.aiApiBase, '/chat/completions'), headers: authHeaders(settings.aiApiKey),
     data: JSON.stringify({ model: settings.aiModel, messages: [{ role: 'system', content: SYSTEM },
-      { role: 'user', content: prompt }], temperature: 0.2, stream: false }),
+      { role: 'user', content: images.length ? [
+        ...images.map(image => ({ type: 'image_url',
+          image_url: { url: `data:${image.mime};base64,${image.data}` } })),
+        { type: 'text', text: prompt },
+      ] : prompt }], temperature: 0.2, stream: false }),
   }, settings, signal);
   const parsed = JSON.parse(response.responseText || '{}') as any;
   const content = parsed?.choices?.[0]?.message?.content;

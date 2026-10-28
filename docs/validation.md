@@ -93,7 +93,7 @@
 
 ## 自动验证
 
-执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 93 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
+执行 `npm run check`：TypeScript 类型检查、esbuild 用户脚本构建、Vitest 共 114 项全部通过。使用合成题目与模拟响应，不将真实课程数据作为 fixture。
 
 覆盖：
 
@@ -115,3 +115,13 @@
 ## 待验收
 
 安装 0.3.2 后，先在真实脚本管理器刷新并导出诊断，确认 `legacyComponentCount` 大于 0。重点验证：真实 GM 环境下 `NEEDS_RELOAD` 自动刷新与续跑；MiMo ASR 在真实听力题中的返回；分类拖拽 11 的 AI 结果是否与关卡期望一致；Goal 2 Listening 的 A→B→C→D→A 循环是否与评分门槛有关。已提交过的练习不能重复提交，应另选题目。
+
+
+## 0.3.8 看图写话与听力+图片
+
+- 新增图片收集：从叶子组件向上查找最近的 `lib-exercise-res-show img`，兼容组合题共享图片；DOM 没有图片时回退到 `exercise.image` 资源 ID 并调用 `getResUrl(id, 3)`。
+- 图片下载后按 PNG/JPEG/GIF/WebP 字节头识别 MIME，转 base64；最多随请求发送 4 张，单张上限 8 MB。请求格式与 MiMo 官方文档一致：`image_url: { url: "data:<mime>;base64,..." }`。
+- 听力+图片：先使用题目 `audioScript` 或 ASR 转写，再把转写、整页文本、选项/空位和图片一起交给多模态模型；提示词要求以图片中的文字和页面文本为准。
+- 图片解析或下载失败时提示模型“图片读取失败，只依据文本作答”，不暂停练习；若模型不支持图片并返回 HTTP 400/413/415/422，自动重试一次纯文本请求。
+- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 114 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
+- **待真实验收：** 在正式脚本管理器中用已配置的 MiMo 视觉模型（`mimo-v2.6-flash`/pro）对真实看图写话和听力+图片题各提交一次，确认模型实际读取了图片而非仅凭文本猜测。

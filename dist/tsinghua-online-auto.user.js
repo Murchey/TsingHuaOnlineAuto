@@ -2309,13 +2309,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         const items = (Array.isArray(ext.items) ? ext.items : []).map(object);
         const itemIds = new Set(items.map((item) => String(item.id)));
         const targets = Array.isArray(task.value) ? task.value.map(object) : [];
-<<<<<<< Updated upstream
-=======
-<<<<<<< HEAD
         const normalize = (value3) => typeof value3 === "string" ? value3.trim().toLowerCase().replace(/^\(?([a-z])\)?[.):]?\s+/, "").replace(/[.。!！,，;；:：]+$/g, "").replace(/\s+/g, " ") : "";
-=======
->>>>>>> a811ec0b3fa682298ced0ed2df121b5548a211ac
->>>>>>> Stashed changes
         const toRows = (raw2) => {
           if (Array.isArray(raw2)) return raw2.map((entry) => {
             if (!entry || typeof entry !== "object") return { answer: entry };
@@ -2327,12 +2321,6 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
           return [];
         };
         const raw = [result.fill, result.matching, result.matches, result.pairs, result.answers, result.answer].find((value3) => Array.isArray(value3) || !!value3 && typeof value3 === "object");
-<<<<<<< Updated upstream
-        const rows = toRows(raw);
-        const byId = new Map(rows.map((row) => [String(row.idx ?? ""), row.answer]));
-        const normalize = (value3) => typeof value3 === "string" ? value3.trim().toLowerCase().replace(/^\(?([a-z])\)?[.):]?\s+/, "").replace(/[.。!！,，;；:：]+$/g, "").replace(/\s+/g, " ") : "";
-=======
-<<<<<<< HEAD
         const targetList = (Array.isArray(ext.targets) ? ext.targets : []).map(object);
         const targetFor = (value3) => {
           if (value3 == null) return void 0;
@@ -2349,12 +2337,6 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         };
         const rows = toRows(raw).map((row) => ({ ...row, idx: targetFor(row.idx) ?? row.idx }));
         const byId = new Map(rows.map((row) => [String(row.idx ?? ""), row.answer]));
-=======
-        const rows = toRows(raw);
-        const byId = new Map(rows.map((row) => [String(row.idx ?? ""), row.answer]));
-        const normalize = (value3) => typeof value3 === "string" ? value3.trim().toLowerCase().replace(/^\(?([a-z])\)?[.):]?\s+/, "").replace(/[.。!！,，;；:：]+$/g, "").replace(/\s+/g, " ") : "";
->>>>>>> a811ec0b3fa682298ced0ed2df121b5548a211ac
->>>>>>> Stashed changes
         const label = (value3) => {
           const text2 = typeof value3 === "string" ? value3.trim() : "";
           return /^\(?([a-z])\)?[.):]?(?:\s|$)/i.exec(text2)?.[1]?.toLowerCase() ?? "";

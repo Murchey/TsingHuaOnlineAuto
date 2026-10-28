@@ -837,9 +837,6 @@ describe('legacy production route regression', () => {
     const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
     expect(value).toEqual([{ idx: 't-1', answer: 'i-2' }, { idx: 't-2', answer: 'i-1' }]);
   });
-<<<<<<< Updated upstream
-=======
-<<<<<<< HEAD
   it('matches type 10 rows keyed by target text and answers written as descriptions', async () => {
     const exercise: any = exercise10();
     exercise.drag[0].styleContent = { paragraphs: [{ contentItems: [{ text: 'cheese-rolling' }] }] };
@@ -865,9 +862,6 @@ describe('legacy production route regression', () => {
     const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
     expect(value).toEqual([{ idx: 't-1', answer: 'i-2' }, { idx: 't-2', answer: 'i-1' }]);
   });
-=======
->>>>>>> a811ec0b3fa682298ced0ed2df121b5548a211ac
->>>>>>> Stashed changes
   it('uses type 10 answers carried by the exercise without asking AI', async () => {
     const exercise: any = exercise10();
     exercise.drag[0].answer = 'i-2';

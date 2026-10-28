@@ -6,6 +6,8 @@ export function legacyQuestion(exercise: unknown): Question {
   const q: Question = { id: String(e.id || ''), type: `legacy_${type}`, instruction: String(e.contentString || '') };
   const audio = collectAudioIds(e);
   if (audio.length) q.audio = audio;
+  const videos = collectVideoIds(e);
+  if (videos.length) q.video = videos;
   const images = collectImageIds(e);
   if (images.length) q.images = images;
   if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
@@ -20,6 +22,7 @@ export function legacyQuestion(exercise: unknown): Question {
       }
       // Composite pages render one shared audio/picture above all child exercises.
       if (q.audio?.length) question.audio = [...new Set([...(question.audio || []), ...q.audio])];
+      if (q.video?.length) question.video = [...new Set([...(question.video || []), ...q.video])];
       if (q.images?.length) question.images = [...new Set([...(question.images || []), ...q.images])];
       return question;
     });
@@ -154,6 +157,22 @@ function arrayField(e: Record<string, unknown>, ...keys: string[]): unknown[] {
     if (found.length) return found;
   }
   return [];
+}
+
+function collectVideoIds(e: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const add = (value: unknown): void => {
+    if (typeof value === 'string') {
+      for (const item of value.split(',')) { const v = item.trim(); if (v) out.push(v); }
+      return;
+    }
+    if (Array.isArray(value)) { for (const item of value) add(item); return; }
+    if (!value || typeof value !== 'object') return;
+    const entry = object(value);
+    for (const key of ['id', 'resId', 'resourceID', 'resourceId', 'video', 'videoUrl', 'url', 'path']) add(entry[key]);
+  };
+  for (const key of ['video', 'videos', 'videoList', 'videoUrl', 'media', 'mediaList']) add(e[key]);
+  return [...new Set(out.filter(item => item.length > 0 && item.length <= 400))];
 }
 
 function imageTokens(value: unknown): string[] {

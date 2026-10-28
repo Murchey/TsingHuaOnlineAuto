@@ -1,4 +1,4 @@
-import { bounded } from './async';
+import { bounded, check } from './async';
 import { Halt, type Settings } from './model';
 
 interface GmResponse { status: number; responseText?: string; response?: unknown; }
@@ -213,4 +213,94 @@ export async function transcribeAudio(audio: ArrayBuffer, filename: string, sett
     (Array.isArray(parsed.results) ? contentObject(parsed.results[0]).text : contentObject(parsed.result).text);
   if (typeof text !== 'string' || !text.trim()) throw new Halt('ASR_RESPONSE', 'ASR 没有返回转写文本');
   return text.trim();
+}
+
+/** Download a large exercise asset through GM_xmlhttpRequest when available. */
+export async function fetchMedia(url: string, settings: Settings, signal: AbortSignal): Promise<ArrayBuffer> {
+  const response = await request({ url, method: 'GET', responseType: 'arraybuffer' }, settings, signal);
+  const buffer = response.response;
+  if (buffer instanceof Blob) return buffer.arrayBuffer();
+  if (ArrayBuffer.isView(buffer)) {
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  }
+  if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength) {
+    throw new Halt('MEDIA_DOWNLOAD', '媒体文件下载失败或为空');
+  }
+  return buffer;
+}
+
+const ASR_SAMPLE_RATE = 16_000;
+const ASR_CHUNK_BYTES = 5_600_000; // ~7.5 MB after base64, below MiMo ASR's 10 MB limit
+
+function audioContext(): any {
+  const scope = ((globalThis as any).unsafeWindow ?? globalThis) as any;
+  return scope.AudioContext || scope.webkitAudioContext || (globalThis as any).AudioContext;
+}
+
+async function decodeVideoAudio(video: ArrayBuffer): Promise<AudioBuffer> {
+  const Ctor = audioContext();
+  if (typeof Ctor !== 'function') throw new Halt('VIDEO_AUDIO', '浏览器不支持视频音轨解码');
+  const context = new Ctor();
+  try {
+    return await context.decodeAudioData(video.slice(0));
+  } catch {
+    throw new Halt('VIDEO_AUDIO', '视频音轨解码失败，请确认视频为 MP4/MOV 且包含音频');
+  } finally {
+    try { await context.close(); } catch { /* ignore */ }
+  }
+}
+
+function videoToPcm(audio: AudioBuffer, sampleRate = ASR_SAMPLE_RATE): Int16Array {
+  const channels = audio.numberOfChannels;
+  const first = audio.getChannelData(0);
+  const second = channels > 1 ? audio.getChannelData(1) : null;
+  const duration = Number.isFinite(audio.duration) ? audio.duration : audio.length / audio.sampleRate;
+  const length = Math.max(0, Math.ceil(duration * sampleRate));
+  const out = new Int16Array(length);
+  const step = audio.sampleRate / sampleRate;
+  let energy = 0;
+  for (let i = 0; i < length; i++) {
+    const position = i * step, left = Math.floor(position), right = Math.min(left + 1, first.length - 1);
+    const fraction = position - left;
+    let sample = first[left] * (1 - fraction) + first[right] * fraction;
+    if (second) sample = (sample + second[left] * (1 - fraction) + second[right] * fraction) / 2;
+    sample = Math.max(-1, Math.min(1, sample));
+    energy += sample * sample;
+    out[i] = sample * 0x7fff;
+  }
+  if (!out.length || Math.sqrt(energy / out.length) < 0.0002) {
+    throw new Halt('VIDEO_AUDIO', '视频音轨为空或为静音，无法转写');
+  }
+  return out;
+}
+
+function pcmToWav(pcm: Int16Array, sampleRate = ASR_SAMPLE_RATE): ArrayBuffer {
+  const buffer = new ArrayBuffer(44 + pcm.length * 2), view = new DataView(buffer);
+  const write = (offset: number, value: string): void => {
+    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  write(0, 'RIFF'); view.setUint32(4, 36 + pcm.length * 2, true); write(8, 'WAVE');
+  write(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  write(36, 'data'); view.setUint32(40, pcm.length * 2, true);
+  new Int16Array(buffer, 44).set(pcm);
+  return buffer;
+}
+
+/** Convert a video's audio track to 16 kHz mono WAV chunks and transcribe it with the configured ASR. */
+export async function transcribeVideo(video: ArrayBuffer, filename: string, settings: Settings,
+  signal: AbortSignal): Promise<string> {
+  if (!settings.asrApiKey.trim()) throw new Halt('ASR_CONFIG', '视频题需要 ASR：请先在面板填写 ASR API Key');
+  const audio = await decodeVideoAudio(video);
+  const pcm = videoToPcm(audio);
+  const perChunk = Math.max(1, Math.floor(ASR_CHUNK_BYTES / 2));
+  const texts: string[] = [];
+  const stem = filename.replace(/\.[^.]+$/, '') || 'video';
+  for (let start = 0, index = 0; start < pcm.length; start += perChunk, index++) {
+    check(signal);
+    const chunk = pcm.subarray(start, Math.min(start + perChunk, pcm.length));
+    texts.push(await transcribeAudio(pcmToWav(chunk), `${stem}-${index + 1}.wav`, settings, signal));
+  }
+  return texts.map(text => text.trim()).filter(Boolean).join('\n');
 }

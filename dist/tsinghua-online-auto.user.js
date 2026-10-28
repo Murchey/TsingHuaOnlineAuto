@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.9
+// @version      0.4.0
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -1015,6 +1015,97 @@
     if (typeof text2 !== "string" || !text2.trim()) throw new Halt("ASR_RESPONSE", "ASR 没有返回转写文本");
     return text2.trim();
   }
+  async function fetchMedia(url, settings, signal) {
+    const response = await request({ url, method: "GET", responseType: "arraybuffer" }, settings, signal);
+    const buffer = response.response;
+    if (buffer instanceof Blob) return buffer.arrayBuffer();
+    if (ArrayBuffer.isView(buffer)) {
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    }
+    if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength) {
+      throw new Halt("MEDIA_DOWNLOAD", "媒体文件下载失败或为空");
+    }
+    return buffer;
+  }
+  var ASR_SAMPLE_RATE = 16e3;
+  var ASR_CHUNK_BYTES = 56e5;
+  function audioContext() {
+    const scope = globalThis.unsafeWindow ?? globalThis;
+    return scope.AudioContext || scope.webkitAudioContext || globalThis.AudioContext;
+  }
+  async function decodeVideoAudio(video) {
+    const Ctor = audioContext();
+    if (typeof Ctor !== "function") throw new Halt("VIDEO_AUDIO", "浏览器不支持视频音轨解码");
+    const context = new Ctor();
+    try {
+      return await context.decodeAudioData(video.slice(0));
+    } catch {
+      throw new Halt("VIDEO_AUDIO", "视频音轨解码失败，请确认视频为 MP4/MOV 且包含音频");
+    } finally {
+      try {
+        await context.close();
+      } catch {
+      }
+    }
+  }
+  function videoToPcm(audio, sampleRate = ASR_SAMPLE_RATE) {
+    const channels = audio.numberOfChannels;
+    const first = audio.getChannelData(0);
+    const second = channels > 1 ? audio.getChannelData(1) : null;
+    const duration = Number.isFinite(audio.duration) ? audio.duration : audio.length / audio.sampleRate;
+    const length = Math.max(0, Math.ceil(duration * sampleRate));
+    const out = new Int16Array(length);
+    const step = audio.sampleRate / sampleRate;
+    let energy = 0;
+    for (let i = 0; i < length; i++) {
+      const position = i * step, left = Math.floor(position), right = Math.min(left + 1, first.length - 1);
+      const fraction = position - left;
+      let sample = first[left] * (1 - fraction) + first[right] * fraction;
+      if (second) sample = (sample + second[left] * (1 - fraction) + second[right] * fraction) / 2;
+      sample = Math.max(-1, Math.min(1, sample));
+      energy += sample * sample;
+      out[i] = sample * 32767;
+    }
+    if (!out.length || Math.sqrt(energy / out.length) < 2e-4) {
+      throw new Halt("VIDEO_AUDIO", "视频音轨为空或为静音，无法转写");
+    }
+    return out;
+  }
+  function pcmToWav(pcm, sampleRate = ASR_SAMPLE_RATE) {
+    const buffer = new ArrayBuffer(44 + pcm.length * 2), view = new DataView(buffer);
+    const write = (offset, value) => {
+      for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+    };
+    write(0, "RIFF");
+    view.setUint32(4, 36 + pcm.length * 2, true);
+    write(8, "WAVE");
+    write(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    write(36, "data");
+    view.setUint32(40, pcm.length * 2, true);
+    new Int16Array(buffer, 44).set(pcm);
+    return buffer;
+  }
+  async function transcribeVideo(video, filename, settings, signal) {
+    if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "视频题需要 ASR：请先在面板填写 ASR API Key");
+    const audio = await decodeVideoAudio(video);
+    const pcm = videoToPcm(audio);
+    const perChunk = Math.max(1, Math.floor(ASR_CHUNK_BYTES / 2));
+    const texts = [];
+    const stem = filename.replace(/\.[^.]+$/, "") || "video";
+    for (let start = 0, index = 0; start < pcm.length; start += perChunk, index++) {
+      check(signal);
+      const chunk = pcm.subarray(start, Math.min(start + perChunk, pcm.length));
+      texts.push(await transcribeAudio(pcmToWav(chunk), `${stem}-${index + 1}.wav`, settings, signal));
+    }
+    return texts.map((text2) => text2.trim()).filter(Boolean).join("\n");
+  }
 
   // src/legacy-angular.ts
   var runtime;
@@ -1067,6 +1158,8 @@
     const q = { id: String(e.id || ""), type: `legacy_${type}`, instruction: String(e.contentString || "") };
     const audio = collectAudioIds(e);
     if (audio.length) q.audio = audio;
+    const videos = collectVideoIds(e);
+    if (videos.length) q.video = videos;
     const images = collectImageIds(e);
     if (images.length) q.images = images;
     if ([14, 15, 16, 25].includes(type) && Array.isArray(e.exerciseList)) {
@@ -1078,6 +1171,7 @@
           question.extension = { ...ext, audioScript: parentScript };
         }
         if (q.audio?.length) question.audio = [.../* @__PURE__ */ new Set([...question.audio || [], ...q.audio])];
+        if (q.video?.length) question.video = [.../* @__PURE__ */ new Set([...question.video || [], ...q.video])];
         if (q.images?.length) question.images = [.../* @__PURE__ */ new Set([...question.images || [], ...q.images])];
         return question;
       });
@@ -1218,6 +1312,27 @@
       if (found.length) return found;
     }
     return [];
+  }
+  function collectVideoIds(e) {
+    const out = [];
+    const add = (value) => {
+      if (typeof value === "string") {
+        for (const item of value.split(",")) {
+          const v = item.trim();
+          if (v) out.push(v);
+        }
+        return;
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) add(item);
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      const entry = object(value);
+      for (const key2 of ["id", "resId", "resourceID", "resourceId", "video", "videoUrl", "url", "path"]) add(entry[key2]);
+    };
+    for (const key2 of ["video", "videos", "videoList", "videoUrl", "media", "mediaList"]) add(e[key2]);
+    return [...new Set(out.filter((item) => item.length > 0 && item.length <= 400))];
   }
   function imageTokens(value) {
     if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
@@ -1714,9 +1829,9 @@
       if (settings.aiAnswers) {
         if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "口语简答题需要 AI 生成回答，请填写 AI API Key");
         let transcript = "";
-        if (q.audio?.length && settings.asrApiKey.trim()) {
+        if ((q.audio?.length || q.video?.length) && settings.asrApiKey.trim()) {
           try {
-            transcript = await this.transcribeQuestionAudio(c, q.audio, settings, signal);
+            transcript = q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : await this.transcribeQuestionVideo(c, q.video, settings, signal);
           } catch (error) {
             if (error instanceof Halt && error.code === "CANCELLED") throw error;
           }
@@ -1726,7 +1841,7 @@
 题目: ${q.instruction || q.stem || ""}
 页面文本:
 ${(q.stem || "").slice(0, 3e3)}
-听力转写: ${transcript || "（无）"}
+音频/视频转写: ${transcript || "（无）"}
 ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题目图片，请根据图片内容作答。` : ""}`;
         const result = object(aiImages.images.length ? await answerWithAi(prompt, settings, signal, aiImages.images) : await answerWithAi(prompt, settings, signal));
         answer = typeof result.answer === "string" ? result.answer.trim() : "";
@@ -2098,13 +2213,14 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
         const entry = object(line);
         return `${String(entry.role || "")}: ${String(entry.text || "")}`;
       }) : [];
-      const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : "");
+      const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : q.video?.length ? await this.transcribeQuestionVideo(c, q.video, settings, signal) : "");
       const aiImages = await this.aiImages(q, root, c, settings, signal);
       const options = Array.isArray(q.extension) ? q.extension.map((option) => ({
         id: String(object(option).idx),
         text: text(object(option).val)
       })) : [];
       const blanks = Array.isArray(task.value) ? task.value.map(object).map((blank) => ({ idx: String(blank.idx) })) : [];
+      const blankText = this.blankText(root, blanks.map((blank) => String(blank.idx)));
       const pageRoot = root.closest("app-course-task-stu") ?? root;
       const pageText = (pageRoot.innerText || pageRoot.textContent || root.innerText || root.textContent || "").slice(0, 8e3);
       const judge = Number(ext.legacyType) === 22 ? {
@@ -2128,13 +2244,15 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
 ${pageText}
 选项: ${JSON.stringify(options)}
 空位: ${JSON.stringify(blanks)}
+题目原句（[[BLANK:ID]] 为待填空格）: ${blankText || "（无）"}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
 待分类项: ${JSON.stringify(catalog.items)}` : ""}
 ${matching ? `匹配目标: ${JSON.stringify(matching.targets)}
 匹配选项: ${JSON.stringify(matching.items)}` : ""}
 ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ""}
-听力转写: ${transcript || "（无）"}
+听力/视频转写: ${transcript || "（无）"}
+${q.video?.length ? "本题包含视频：已下载视频、提取音轨并完成 ASR。请依据转写中的步骤、顺序和细节作答。" : ""}
 ${aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` : aiImages.expected ? "图片: 本题含图片，但图片读取失败；请只依据文本作答。" : ""}
 返回格式: ${schema}
 ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空的 answer 必须使用选项中的 ID。" : ""}
@@ -2268,6 +2386,62 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         if (images.length >= 4) break;
       }
       return { images, expected: sources.length };
+    }
+    async resolveVideoUrl(c, item, settings, signal) {
+      const raw = item.video ?? item.videoUrl ?? item.resId;
+      if (typeof raw === "string") {
+        const direct = absoluteAudio(raw);
+        if (direct) return direct;
+      }
+      if (typeof raw !== "string" || !raw.trim()) {
+        throw new Halt("VIDEO_RESOLVE", "视频题缺少视频资源");
+      }
+      const service = c.getWebUrlService ?? c.webUrlService ?? this.components().map(({ component }) => component.getWebUrlService ?? component.webUrlService).find((value) => typeof value?.getResUrl === "function");
+      const source = typeof service?.getResUrl === "function" ? service.getResUrl(raw, 1) : void 0;
+      if (typeof source?.subscribe !== "function") {
+        throw new Halt("VIDEO_RESOLVE", "页面未提供视频解析服务，请刷新页面后重试");
+      }
+      let subscription;
+      try {
+        const response = await bounded(new Promise((resolve, reject) => {
+          subscription = source.subscribe({ next: resolve, error: reject });
+        }), settings.timeoutMs, signal);
+        const url = object(response).url;
+        if (typeof url === "string" && url.trim()) return new URL(url, location.href).href;
+        throw new Halt("VIDEO_RESOLVE", "视频地址为空");
+      } catch (error) {
+        if (error instanceof Halt) throw error;
+        const status = Number(object(error).status);
+        throw new Halt("VIDEO_RESOLVE", `视频地址解析失败${status ? `（HTTP ${status}）` : ""}，请检查网络`);
+      } finally {
+        subscription?.unsubscribe();
+      }
+    }
+    async transcribeQuestionVideo(c, videoIds, settings, signal) {
+      if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "视频题需要 ASR：请先在面板填写 ASR API Key");
+      const key2 = "video:" + videoIds.join(",");
+      const cached = this.transcripts.get(key2);
+      if (cached) return cached;
+      const transcripts = [];
+      for (let index = 0; index < videoIds.length; index++) {
+        const url = await this.resolveVideoUrl(c, { id: `video-${index}`, video: videoIds[index] }, settings, signal);
+        const video = await fetchMedia(url, settings, signal);
+        transcripts.push(await transcribeVideo(video, `question-${index}.mp4`, settings, signal));
+      }
+      const result = [...new Set(transcripts.filter(Boolean))].join("\n");
+      if (this.transcripts.size >= 100) this.transcripts.clear();
+      this.transcripts.set(key2, result);
+      return result;
+    }
+    /** Render the child sentence with explicit blank markers so the model knows what to fill. */
+    blankText(root, ids) {
+      if (!ids.length) return "";
+      const clone = root.cloneNode(true);
+      for (const idx of ids) {
+        const field = clone.querySelector('[id="a-' + idx + '"], [id="' + idx + '"]');
+        if (field) field.replaceWith(clone.ownerDocument.createTextNode("[[BLANK:" + idx + "]]"));
+      }
+      return (clone.innerText || clone.textContent || "").replace(/\s+/g, " ").trim();
     }
     async transcribeQuestionAudio(c, audioIds, settings, signal) {
       if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "听力题需要 ASR：请先在面板填写 ASR API Key");
@@ -3037,7 +3211,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.9";
+      this.el("version").textContent = false ? "dev" : "0.4.0";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3247,7 +3421,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.9",
+        version: false ? "dev" : "0.4.0",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

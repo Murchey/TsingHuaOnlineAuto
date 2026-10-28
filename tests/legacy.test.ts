@@ -6,11 +6,11 @@ import { Controller } from '../src/controller';
 import { Store } from '../src/storage';
 import { defaults } from '../src/model';
 import { scoreWithChivox } from '../src/chivox';
-import { answerWithAi, fetchImage, synthesizeSpeech, transcribeAudio } from '../src/api';
+import { answerWithAi, fetchImage, fetchMedia, synthesizeSpeech, transcribeAudio, transcribeVideo } from '../src/api';
 
 vi.mock('../src/chivox', () => ({ scoreWithChivox: vi.fn() }));
 vi.mock('../src/api', () => ({ synthesizeSpeech: vi.fn(), answerWithAi: vi.fn(), transcribeAudio: vi.fn(),
-  fetchImage: vi.fn() }));
+  transcribeVideo: vi.fn(), fetchImage: vi.fn(), fetchMedia: vi.fn() }));
 
 const path = '/legacy/course-study-student/10/20/30/example-key';
 const signal = () => new AbortController().signal;
@@ -129,11 +129,12 @@ describe('legacy production route regression', () => {
   });
   it('passes a composite listening script to its child questions', () => {
     const data = legacyData({ exercise: { id: 'q-15', type: 15, audioScript: '<p>Script text</p>',
-      audio: 'parent-audio', image: 'parent-image',
+      audio: 'parent-audio', video: 'parent-video', image: 'parent-image',
       exerciseList: [{ id: 'c-1', type: 3, fillBlanks: [{ id: 'blank-a', answer: 'x' }] }] }, submitNum: 0 });
     const child = data.questionVOList[0].children![0];
     expect((child.extension as any).audioScript).toBe('Script text');
     expect(child.audio).toEqual(['parent-audio']);
+    expect(child.video).toEqual(['parent-video']);
     expect(child.images).toEqual(['parent-image']);
   });
   it('plans oral-brief type 8 as recording instead of writing', () => {
@@ -470,6 +471,33 @@ describe('legacy production route regression', () => {
     await adapter.fill(unit, task, settings, signal());
     expect(answerWithAi).toHaveBeenCalledWith(expect.stringContaining('图片读取失败'), settings, expect.anything());
     expect(answerWithAi).toHaveBeenCalledTimes(1);
+  });
+  it('extracts a video audio track and feeds its ASR transcript to AI', async () => {
+    document.body.innerHTML = '<app-course-task-stu><lib-writing-sample><textarea></textarea></lib-writing-sample><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const exercise20: any = { id: 'video-q', type: 20, contentString: 'Watch the video and list the steps.', video: 'video-res' };
+    const getResUrl = vi.fn((id: string, type: number) => ({ subscribe: ({ next }: any) => {
+      next({ url: 'https://cdn.example/' + id + '-' + type + '.mp4' }); return { unsubscribe: vi.fn() };
+    } }));
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise: exercise20, pageTitle: 'Video',
+      doRecord: { type: 20, score: 0, answer: '' }, loadDoRecord() {}, doRecordChange: { emit: vi.fn() },
+      getWebUrlService: { getResUrl } };
+    const adapter = new LegacyAdapter(() => [{ root, component: { ...c, loadDoRecord: c.loadDoRecord } }, { root: host, component: c }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise: exercise20, submitNum: 0, doRecord: c.doRecord }), { allowMissing: true })[0];
+    vi.mocked(fetchMedia).mockResolvedValue(new ArrayBuffer(8));
+    vi.mocked(transcribeVideo).mockResolvedValue('First, roll the cheese. Then, run after it.');
+    vi.mocked(answerWithAi).mockResolvedValue({ answer: 'AI video answer' });
+    const settings = { ...defaults, aiAnswers: true, aiApiKey: 'ai-key', asrApiKey: 'asr-key' };
+    await adapter.fill(unit, task, settings, signal());
+    expect(getResUrl).toHaveBeenCalledWith('video-res', 1);
+    expect(fetchMedia).toHaveBeenCalledWith('https://cdn.example/video-res-1.mp4', settings, expect.anything());
+    expect(transcribeVideo).toHaveBeenCalledWith(expect.any(ArrayBuffer), 'question-0.mp4', settings, expect.anything());
+    const prompt = vi.mocked(answerWithAi).mock.calls[0][0] as string;
+    expect(prompt).toContain('First, roll the cheese. Then, run after it.');
+    expect(prompt).toContain('本题包含视频');
   });
   it('generates an AI oral answer, uploads its TTS audio, and writes the VOD answer', async () => {
     document.body.innerHTML = '<app-course-task-stu><lib-oral-brief-exercise-cs-study></lib-oral-brief-exercise-cs-study><button>Submit</button></app-course-task-stu>';

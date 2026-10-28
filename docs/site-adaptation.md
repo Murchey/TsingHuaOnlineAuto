@@ -38,6 +38,8 @@ type 8 实际为 `LIB-ORAL-BRIEF-EXERCISE-CS-STUDY` 口语简答，不是 textar
 - 站点重置某关答案但保留 `submitNum`（服务器上没有任何完整作答）时，已校验 checkpoint 会自动清理并重新作答；服务器记录完全消失仍以 `RECORD_CHANGED` 暂停。
 - MiMo ASR 使用 `/chat/completions`，user content 仅含 `input_audio`；OpenAI 兼容 ASR 仍走 multipart `/audio/transcriptions`。
 
+0.4.0 处理视频题：旧版 `exercise.video` 是资源 ID，`LIB-EXERCISE-RES-SHOW` 以 `type=1` 渲染，`getResUrl(id,1)` 解析为 MP4（第 3447e 题为 `vod.tsinghuaelt.com` 签名 URL，21 MB、140.959 秒，页面直接 `fetch` 返回 200）。适配器用 `fetchMedia`（优先 GM `arraybuffer`）下载视频，`AudioContext.decodeAudioData` 在浏览器内解码 MP4 音轨，重采样为 16 kHz 单声道 PCM，再写入 WAV；因 MiMo ASR 只接受 wav/mp3 且 Base64 上限 10 MB，按 5.6 MB PCM 分块调用现有 `transcribeAudio`，拼接转写。组合题 14/15/16/25 的子题继承父题 `video`，同一视频只转写一次。填空提示新增 `blankText`：克隆叶子组件 DOM，把 `id="a-<blankId>"` 的 contenteditable 替换为 `[[BLANK:<blankId>]]`，让模型看到空位在句中的准确位置；否则单空题容易被模型填成其他步骤。全流程不依赖 ffmpeg、wasm 或外部 CDN。
+
 0.3.9 修复 type 10 一对一匹配的 AI 结果校验：模型常返回右侧选项原文、`a/b/c` 标签、`1/2/3` 序号或按位置排列的数组，适配器先用 `id` 精确匹配，再用去掉标签的原文、标签、序号和唯一包含关系反查 `dragged[].id`；首次校验失败会把目标与选项清单附在重试提示中，并允许题目存在未使用的干扰选项。
 
 0.3.8 处理看图写话与听力+图片：旧版 `exercise.image` 是逗号分隔的资源 ID，页面渲染为 `lib-exercise-res-show > .show-img > img`。适配器从叶子作答组件向上找到最近的含图包装层，优先收集已渲染图片的绝对 URL；没有 DOM 图片时才回退到资源 ID，并用 `getResUrl(id, 3)` 解析。图片下载后按字节识别 MIME、转 base64，按 OpenAI/MiMo 兼容的 `image_url: { url: "data:<mime>;base64,..." }` 发送，最多 4 张。听力题仍先 ASR（或使用题目 `audioScript`），再把转写、整页文本和图片一起交给模型；图片读取失败只提示模型按文本作答，不暂停整块练习。

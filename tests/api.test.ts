@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { answerWithAi, fetchImage, synthesizeSpeech, transcribeAudio } from '../src/api';
+import { answerWithAi, fetchImage, synthesizeSpeech, transcribeAudio, transcribeVideo } from '../src/api';
 import { defaults, type Settings } from '../src/model';
 
 const signal = () => new AbortController().signal;
@@ -88,6 +88,30 @@ it('accepts an inline data URI image without a network request', async () => {
   await expect(fetchImage('data:image/jpeg;base64,QUJD', cfg(), signal()))
     .resolves.toEqual({ mime: 'image/jpeg', data: 'QUJD' });
   expect(gm).not.toHaveBeenCalled();
+});
+it('decodes a video audio track to a 16 kHz WAV before MiMo ASR', async () => {
+  class FakeAudioBuffer {
+    duration = 1; sampleRate = 16000; length = 16000; numberOfChannels = 1;
+    getChannelData() { const data = new Float32Array(16000); data.fill(0.1); return data; }
+  }
+  class FakeAudioContext {
+    decodeAudioData = vi.fn(async () => new FakeAudioBuffer());
+    close = vi.fn(async () => undefined);
+  }
+  vi.stubGlobal('AudioContext', FakeAudioContext);
+  const calls: any[] = [];
+  vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
+    calls.push(details);
+    details.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'video transcript' } }] }) });
+    return { abort: vi.fn() };
+  });
+  await expect(transcribeVideo(new ArrayBuffer(8), 'q.mp4',
+    cfg({ asrApiKey: 'k', asrApiBase: 'https://api.xiaomimimo.com/v1', asrModel: 'mimo-v2.5-asr' }), signal()))
+    .resolves.toBe('video transcript');
+  const part = JSON.parse(calls[0].data).messages[0].content[0];
+  expect(part.type).toBe('input_audio');
+  expect(part.input_audio.format).toBe('wav');
+  expect(part.input_audio.data.startsWith('UklGR')).toBe(true);
 });
 it('falls back to fetch when the userscript manager lacks GM_xmlhttpRequest', async () => {
   const fetchMock = vi.fn(async () => ({ ok: true, status: 200,

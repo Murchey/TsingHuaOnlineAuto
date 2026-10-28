@@ -1,7 +1,8 @@
 import { bounded, check, sleep, until } from './async';
 import { canonical, object, stable, text } from './answers';
 import { scoreWithChivox } from './chivox';
-import { answerWithAi, fetchImage, synthesizeSpeech, transcribeAudio, type ImagePart } from './api';
+import { answerWithAi, fetchImage, fetchMedia, synthesizeSpeech, transcribeAudio, transcribeVideo,
+  type ImagePart } from './api';
 import { routePath, shown, TsinghuaAdapter } from './adapter';
 import { legacyComponents, runInLegacyZone, type LegacyComponent } from './legacy-angular';
 import { legacyData, legacyValue, richText, scriptFillAnswers } from './legacy-data';
@@ -283,18 +284,20 @@ export class LegacyAdapter implements Adapter {
     if (settings.aiAnswers) {
       if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '口语简答题需要 AI 生成回答，请填写 AI API Key');
       let transcript = '';
-      if (q.audio?.length && settings.asrApiKey.trim()) {
+      if ((q.audio?.length || q.video?.length) && settings.asrApiKey.trim()) {
         // The transcript only enriches the prompt; a failing ASR must not block an
         // otherwise answerable speaking task.
-        try { transcript = await this.transcribeQuestionAudio(c, q.audio, settings, signal); }
-        catch (error) { if (error instanceof Halt && error.code === 'CANCELLED') throw error; }
+        try {
+          transcript = q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) :
+            await this.transcribeQuestionVideo(c, q.video!, settings, signal);
+        } catch (error) { if (error instanceof Halt && error.code === 'CANCELLED') throw error; }
       }
       const aiImages = await this.aiImages(q, root, c, settings, signal);
       const prompt = `你是英语口语考试助手。请根据题目写一个自然、简洁、适合朗读的英语回答，2-4 句。只返回 JSON：{"answer":"..."}。
 题目: ${q.instruction || q.stem || ''}
 页面文本:
 ${(q.stem || '').slice(0, 3000)}
-听力转写: ${transcript || '（无）'}
+音频/视频转写: ${transcript || '（无）'}
 ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题目图片，请根据图片内容作答。` : ''}`;
       const result = object(aiImages.images.length ? await answerWithAi(prompt, settings, signal, aiImages.images) :
         await answerWithAi(prompt, settings, signal));
@@ -673,7 +676,8 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
       return `${String(entry.role || '')}: ${String(entry.text || '')}`;
     }) : [];
     // The legacy listening exercises expose their script; ASR is only a fallback.
-    const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) : '');
+    const transcript = script || (q.audio?.length ? await this.transcribeQuestionAudio(c, q.audio, settings, signal) :
+      (q.video?.length ? await this.transcribeQuestionVideo(c, q.video, settings, signal) : ''));
     // Pictures are rendered by the exercise wrapper (or a shared composite block), so they
     // must be collected from the page DOM before the prompt is built. Failure to read an
     // image degrades to text-only instead of blocking an otherwise answerable question.
@@ -682,6 +686,7 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
       id: String(object(option).idx), text: text(object(option).val),
     })) : [];
     const blanks = Array.isArray(task.value) ? task.value.map(object).map(blank => ({ idx: String(blank.idx) })) : [];
+    const blankText = this.blankText(root, blanks.map(blank => String(blank.idx)));
     // Composite listening pages render their word box / image outside the child question
     // component, so the leaf innerText alone can omit the options the answer must use.
     const pageRoot = (root.closest('app-course-task-stu') as HTMLElement | null) ?? root;
@@ -709,13 +714,15 @@ ${aiImages.images.length ? `图片: 已附上 ${aiImages.images.length} 张题�
 ${pageText}
 选项: ${JSON.stringify(options)}
 空位: ${JSON.stringify(blanks)}
+题目原句（[[BLANK:ID]] 为待填空格）: ${blankText || '（无）'}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
 待分类项: ${JSON.stringify(catalog.items)}` : ''}
 ${matching ? `匹配目标: ${JSON.stringify(matching.targets)}
 匹配选项: ${JSON.stringify(matching.items)}` : ''}
 ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ''}
-听力转写: ${transcript || '（无）'}
+听力/视频转写: ${transcript || '（无）'}
+${q.video?.length ? '本题包含视频：已下载视频、提取音轨并完成 ASR。请依据转写中的步骤、顺序和细节作答。' : ''}
 ${aiImages.images.length ? `图片: 已随消息附上 ${aiImages.images.length} 张题目图片。请先识别图片中的文字、人物、场景和题目要求，再作答；图片与音频转写冲突时，以图片和页面文本为准。` :
   (aiImages.expected ? '图片: 本题含图片，但图片读取失败；请只依据文本作答。' : '')}
 返回格式: ${schema}
@@ -850,6 +857,67 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
       if (images.length >= 4) break;
     }
     return { images, expected: sources.length };
+  }
+
+  private async resolveVideoUrl(c: LegacyComponent, item: Record<string, unknown>, settings: Settings,
+    signal: AbortSignal): Promise<string> {
+    const raw = item.video ?? item.videoUrl ?? item.resId;
+    if (typeof raw === 'string') {
+      const direct = absoluteAudio(raw);
+      if (direct) return direct;
+    }
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new Halt('VIDEO_RESOLVE', '视频题缺少视频资源');
+    }
+    const service = c.getWebUrlService ?? c.webUrlService ??
+      this.components().map(({ component }) => component.getWebUrlService ?? component.webUrlService)
+        .find(value => typeof value?.getResUrl === 'function');
+    const source = typeof service?.getResUrl === 'function' ? service.getResUrl(raw, 1) : undefined;
+    if (typeof source?.subscribe !== 'function') {
+      throw new Halt('VIDEO_RESOLVE', '页面未提供视频解析服务，请刷新页面后重试');
+    }
+    let subscription: { unsubscribe(): void } | undefined;
+    try {
+      const response = await bounded(new Promise<unknown>((resolve, reject) => {
+        subscription = source.subscribe({ next: resolve, error: reject });
+      }), settings.timeoutMs, signal);
+      const url = object(response).url;
+      if (typeof url === 'string' && url.trim()) return new URL(url, location.href).href;
+      throw new Halt('VIDEO_RESOLVE', '视频地址为空');
+    } catch (error) {
+      if (error instanceof Halt) throw error;
+      const status = Number(object(error).status);
+      throw new Halt('VIDEO_RESOLVE', `视频地址解析失败${status ? `（HTTP ${status}）` : ''}，请检查网络`);
+    } finally { subscription?.unsubscribe(); }
+  }
+
+  private async transcribeQuestionVideo(c: LegacyComponent, videoIds: string[], settings: Settings,
+    signal: AbortSignal): Promise<string> {
+    if (!settings.asrApiKey.trim()) throw new Halt('ASR_CONFIG', '视频题需要 ASR：请先在面板填写 ASR API Key');
+    const key = 'video:' + videoIds.join(',');
+    const cached = this.transcripts.get(key);
+    if (cached) return cached;
+    const transcripts: string[] = [];
+    for (let index = 0; index < videoIds.length; index++) {
+      const url = await this.resolveVideoUrl(c, { id: `video-${index}`, video: videoIds[index] }, settings, signal);
+      const video = await fetchMedia(url, settings, signal);
+      transcripts.push(await transcribeVideo(video, `question-${index}.mp4`, settings, signal));
+    }
+    const result = [...new Set(transcripts.filter(Boolean))].join('\n');
+    if (this.transcripts.size >= 100) this.transcripts.clear();
+    this.transcripts.set(key, result);
+    return result;
+  }
+
+  /** Render the child sentence with explicit blank markers so the model knows what to fill. */
+  private blankText(root: HTMLElement, ids: string[]): string {
+    if (!ids.length) return '';
+    const clone = root.cloneNode(true) as HTMLElement;
+    for (const idx of ids) {
+      const field = clone.querySelector<HTMLElement>('[id="a-' + idx + '"], [id="' + idx + '"]');
+      if (field) field.replaceWith(clone.ownerDocument.createTextNode('[[' + 'BLANK:' + idx + ']]'));
+    }
+    return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
   private async transcribeQuestionAudio(c: LegacyComponent, audioIds: string[], settings: Settings,

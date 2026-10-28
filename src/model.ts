@@ -7,6 +7,7 @@ export interface Question {
   extension?: unknown;
   doRecord?: unknown;
   audio?: string[];
+  video?: string[];
   images?: string[];
   children?: Question[];
 }

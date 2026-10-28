@@ -123,7 +123,7 @@
 - 图片下载后按 PNG/JPEG/GIF/WebP 字节头识别 MIME，转 base64；最多随请求发送 4 张，单张上限 8 MB。请求格式与 MiMo 官方文档一致：`image_url: { url: "data:<mime>;base64,..." }`。
 - 听力+图片：先使用题目 `audioScript` 或 ASR 转写，再把转写、整页文本、选项/空位和图片一起交给多模态模型；提示词要求以图片中的文字和页面文本为准。
 - 图片解析或下载失败时提示模型“图片读取失败，只依据文本作答”，不暂停练习；若模型不支持图片并返回 HTTP 400/413/415/422，自动重试一次纯文本请求。
-- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 114 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
+- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 119 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
 - **待真实验收：** 在正式脚本管理器中用已配置的 MiMo 视觉模型（`mimo-v2.6-flash`/pro）对真实看图写话和听力+图片题各提交一次，确认模型实际读取了图片而非仅凭文本猜测。
 
 
@@ -135,3 +135,19 @@
 - 错误信息现在包含目标 UUID 和模型返回值片段，下一次失败可直接定位是模型漏项、重复还是返回了无法匹配的文本。
 - 自动验证：新增文本/标签反查 + 重试、额外干扰项未使用两项用例；`npm run check` 全部通过。
 - **待真实验收：** 更新 0.3.9 后在该题重新运行，确认三次拖拽写入并提交成功。
+
+
+## 0.4.0 视频题：音轨 ASR 与带空位原句的 AI 填空
+
+- 真实页面：`.../6a917a118334d27c2dc3447e`，`APP-COURSE-TASK-STU` type 15，exercise id `cb3c63da-f8dc-9220-87f6-294488624c24`，video `f0dac4036cc371ef955a7511979f0102`，4 个 type 3 子题（First / Then / After that / Finally）。
+- 视频解析：`LIB-EXERCISE-RES-SHOW` 的 `resId` 为该 video，`type=1`；`getResUrl(id,1)` 返回 `https://vod.tsinghuaelt.com/.../*.mp4?auth_key=...`，HEAD 200，`content-length: 21089103`，`content-type: video/mp4`，时长 140.959 秒。
+- 音轨提取：浏览器 `fetch(videoUrl)` 直接下载（CORS 允许），`AudioContext.decodeAudioData` 解码成功（48 kHz、双声道），重采样为 16 kHz 单声道 WAV（约 4.5 MB）。
+- MiMo ASR：`mimo-v2.5-asr` 返回 200，usage 中 `audio_tokens: 875`、`seconds: 140`；转写完整覆盖 cheese-rolling 的 First / Then / After that / Finally 四个步骤。
+- LLM：把转写、页面文本、4 个空位和空位原句一起交给 `mimo-v2.6-flash`，返回：
+  - First → `the competitors come together at the top of`
+  - Then → `someone pushes a very large wheel of cheese down the hill`
+  - After that → `the competitors run after it`
+  - Finally → `the first person to arrive at the bottom wins`
+- 关键修正：只给空位 ID 和 `contentString` 时，单空题会把 First 填成最后一步；克隆叶子 DOM 并写入 `[[BLANK:<id>]]` 后，First 返回正确结果。
+- 自动验证：新增 video 数据收集/组合继承、视频 URL 解析与下载、视频音轨解码到 WAV、MiMo ASR 请求体、带空位原句提示等测试；`npm run check` 共 119 项通过。
+- **待真实验收：** 将 0.4.0 安装到脚本管理器后，在该题点击开始，确认 4 个空位写入并 Submit 成功。当前页面内等价 JS 流程已实测通过，但尚未通过正式 userscript 面板完成一次提交。

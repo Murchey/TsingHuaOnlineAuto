@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.5
+// @version      0.3.6
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -1954,8 +1954,11 @@ ${(q.stem || "").slice(0, 3e3)}
         if (scripted) return { ...task, value: scripted };
       }
       if (task.kind !== "recording" && this.hasTaskAnswers(task)) return task;
-      if (!settings.aiAnswers || task.kind === "recording") return task;
-      if (!settings.aiApiKey.trim()) throw new Halt("AI_CONFIG", "已启用 AI 答题，但未填写 AI API Key");
+      if (task.kind === "recording") return task;
+      if (!settings.aiApiKey.trim()) {
+        if (settings.aiAnswers) throw new Halt("AI_CONFIG", "已启用 AI 答题，但未填写 AI API Key");
+        throw new Halt("NO_ANSWER", "题目没有可解析的答案，且未配置 AI API Key");
+      }
       const q = task.question;
       const script = typeof ext.audioScript === "string" ? ext.audioScript : "";
       const dialogue = Array.isArray(ext.dialogue) ? ext.dialogue.map((line) => {
@@ -2564,12 +2567,17 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       try {
         tasks = planTasks(data, { allowMissing: settings.aiAnswers });
       } catch (error) {
-        this.update({ pending: leaves(data.questionVOList).map((q) => ({
-          questionId: String(q.id),
-          type: q.type,
-          reason: error instanceof Halt ? error.message : "解析失败"
-        })) });
-        throw error;
+        if (error instanceof Halt && ["NO_ANSWER", "AMBIGUOUS"].includes(error.code) && settings.aiApiKey.trim()) {
+          tasks = planTasks(data, { allowMissing: true });
+          this.report("AI_FALLBACK", "部分题目没有可解析的答案，已改用 AI 生成");
+        } else {
+          this.update({ pending: leaves(data.questionVOList).map((q) => ({
+            questionId: String(q.id),
+            type: q.type,
+            reason: error instanceof Halt ? error.message : "解析失败"
+          })) });
+          throw error;
+        }
       }
       const mark = fingerprint(data), values = /* @__PURE__ */ new Map();
       for (const task of tasks) {
@@ -2696,7 +2704,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.5";
+      this.el("version").textContent = false ? "dev" : "0.3.6";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -2906,7 +2914,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.5",
+        version: false ? "dev" : "0.3.6",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

@@ -157,9 +157,16 @@ export class Controller {
     let tasks;
     try { tasks = planTasks(data, { allowMissing: settings.aiAnswers }); }
     catch (error) {
-      this.update({ pending: leaves(data.questionVOList).map(q => ({ questionId: String(q.id), type: q.type,
-        reason: error instanceof Halt ? error.message : '解析失败' })) });
-      throw error;
+      // Some legacy questions ship without a parseable answer. With an AI key present,
+      // treat those blanks as missing and let the model generate them instead of pausing.
+      if (error instanceof Halt && ['NO_ANSWER', 'AMBIGUOUS'].includes(error.code) && settings.aiApiKey.trim()) {
+        tasks = planTasks(data, { allowMissing: true });
+        this.report('AI_FALLBACK', '部分题目没有可解析的答案，已改用 AI 生成');
+      } else {
+        this.update({ pending: leaves(data.questionVOList).map(q => ({ questionId: String(q.id), type: q.type,
+          reason: error instanceof Halt ? error.message : '解析失败' })) });
+        throw error;
+      }
     }
     const mark = fingerprint(data), values = new Map<string, unknown>();
     for (const task of tasks) {

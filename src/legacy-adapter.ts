@@ -639,8 +639,11 @@ ${(q.stem || '').slice(0, 3000)}
     // Never let a generative answer replace an answer the exercise already carries
     // (for example judge optionId): AI is only a fallback for missing data.
     if (task.kind !== 'recording' && this.hasTaskAnswers(task)) return task;
-    if (!settings.aiAnswers || task.kind === 'recording') return task;
-    if (!settings.aiApiKey.trim()) throw new Halt('AI_CONFIG', '已启用 AI 答题，但未填写 AI API Key');
+    if (task.kind === 'recording') return task;
+    if (!settings.aiApiKey.trim()) {
+      if (settings.aiAnswers) throw new Halt('AI_CONFIG', '已启用 AI 答题，但未填写 AI API Key');
+      throw new Halt('NO_ANSWER', '题目没有可解析的答案，且未配置 AI API Key');
+    }
     const q = task.question;
     const script = typeof ext.audioScript === 'string' ? ext.audioScript : '';
     const dialogue = Array.isArray(ext.dialogue) ? ext.dialogue.map(line => {

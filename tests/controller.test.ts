@@ -59,6 +59,19 @@ describe('practice execution and recovery', () => {
     expect(reload).toHaveBeenCalledTimes(3);
     expect(c.logs.some(log => log.code === 'RELOAD_LIMIT')).toBe(true);
   });
+  it('asks the model instead of pausing when a question has no parseable answer', async () => {
+    const f = fakeAdapter(data({ ...fill, answer: '' }));
+    vi.mocked(f.adapter.fill).mockImplementation(async (_u, task) => {
+      const value = (task.value as any[]).map(v => ({ idx: v.idx, answer: 'generated' }));
+      f.values.set(String(task.question.id), value);
+      return value;
+    });
+    const c = new Controller(f.adapter, new Store(), lock);
+    await c.start(f.unit, { ...settings, aiAnswers: false, aiApiKey: 'ai-key' });
+    expect(c.progress.status).toBe('done');
+    expect(c.logs.some(log => log.code === 'AI_FALLBACK')).toBe(true);
+    expect(f.adapter.fill).toHaveBeenCalledTimes(1);
+  });
   it('preflights every question before changing any answer', async () => {
     const f = fakeAdapter(data(choice, { ...writing, answer: '' })), c = new Controller(f.adapter, new Store(), lock);
     await c.start(f.unit, settings);

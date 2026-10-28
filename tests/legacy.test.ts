@@ -637,6 +637,26 @@ describe('legacy production route regression', () => {
     expect(answerWithAi).not.toHaveBeenCalled();
     expect(value).toEqual([{ idx: 's-1', answer: 'opt-t' }, { idx: 's-2', answer: 'opt-f' }]);
   });
+  it('accepts judge answers written as option text and retries once on invalid values', async () => {
+    const exercise = exercise22();
+    document.body.innerHTML = '<app-course-task-stu><lib-judge-exercise-cs-study></lib-judge-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const leaf: any = { status: 1, exercise, doRecord: { type: 22, answer: {} }, doRecordChange: { emit: vi.fn() },
+      selectOption(idx: string, option: string) { this.doRecord.answer[idx] = { id: option, score: 0 }; } };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Judge',
+      doRecord: leaf.doRecord, loadDoRecord() {} };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi)
+      .mockResolvedValueOnce({ fill: [{ idx: 's-1', answer: 'maybe' }, { idx: 's-2', answer: 'False' }] })
+      .mockResolvedValueOnce({ fill: [{ idx: 's-1', answer: 'True' }, { idx: 's-2', answer: 'False' }] });
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(answerWithAi).toHaveBeenCalledTimes(2);
+    expect(value).toEqual([{ idx: 's-1', answer: 'opt-t' }, { idx: 's-2', answer: 'opt-f' }]);
+  });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());
     await controller.start(f.unit, { ...defaults, intervalMs: 0 });

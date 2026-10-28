@@ -685,11 +685,25 @@ ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填空的 answer 必须使用选项中的 ID。' : ''}
 ${q.type === 'fill_base' && object(q.extension).legacyType === 19 ? '对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。' : ''}
 ${Number(ext.legacyType) === 11 ? '每个待分类项必须且只能放入一个目标，全部项目都要分配。' : ''}
-${Number(ext.legacyType) === 22 ? '判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段。' : ''}
+${Number(ext.legacyType) === 22 ? '判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。' : ''}
 ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。' : ''}
 必须严格回答当前题目。`;
     const result = await answerWithAi(prompt, settings, signal);
-    return { ...task, value: this.validateAiValue(task, result) };
+    try { return { ...task, value: this.validateAiValue(task, result) }; }
+    catch (error) {
+      // Judge answers are often written as T/F/NI text; retry once with the allowed ids
+      // spelled out before pausing the whole run.
+      if (Number(ext.legacyType) === 22 && error instanceof Halt && error.code === 'AI_ANSWER') {
+        const allowed = (Array.isArray(ext.options) ? ext.options : []).map(option => {
+          const entry = object(option);
+          return { id: String(entry.id), text: String(entry.text ?? '') };
+        });
+        const retry = await answerWithAi(`${prompt}\n\n上一次返回不符合要求：${JSON.stringify(result).slice(0, 800)}\n只能使用这些选项 id：${JSON.stringify(allowed)}\n请重新返回 {"fill":[{"idx":"句子ID","answer":"选项ID"}]}。`,
+          settings, signal);
+        return { ...task, value: this.validateAiValue(task, retry) };
+      }
+      throw error;
+    }
   }
   private async transcribeQuestionAudio(c: LegacyComponent, audioIds: string[], settings: Settings,
     signal: AbortSignal): Promise<string> {
@@ -724,15 +738,38 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
     }
     if (task.kind === 'fill' && Number(object(q.extension).legacyType) === 22) {
       const ext = object(q.extension);
-      const optionIds = new Set((Array.isArray(ext.options) ? ext.options : []).map(option => String(object(option).id)));
+      const options = (Array.isArray(ext.options) ? ext.options : []).map(object);
       const items = Array.isArray(task.value) ? task.value.map(object) : [];
-      const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
-      const byId = new Map(fill.map(entry => [String(entry.idx), String(entry.answer ?? '')]));
-      if (!optionIds.size || !items.length || items.some(item => {
-        const answer = byId.get(String(item.idx));
-        return !answer || !optionIds.has(answer);
-      })) throw new Halt('AI_ANSWER', 'AI 返回的判断题答案缺失或不是有效选项');
-      return items.map(item => ({ idx: String(item.idx), answer: byId.get(String(item.idx))! }));
+      const raw = [result.fill, result.judge, result.answers].find(Array.isArray) as unknown[] | undefined;
+      const rows = (raw || []).map(entry => typeof entry === 'object' && entry !== null ?
+        object(entry) : { answer: entry });
+      const byId = new Map(rows.map(row => [String(row.idx ?? ''), row.answer ?? row.value]));
+      const text = (value: unknown): string => typeof value === 'string' ? value.trim().toLowerCase()
+        .replace(/[.。!！]/g, '') : typeof value === 'boolean' ? (value ? 'true' : 'false') : '';
+      const match = (value: unknown): string | undefined => {
+        const rawValue = text(value);
+        if (!rawValue) return undefined;
+        const exact = options.find(option => String(option.id) === String(value).trim());
+        if (exact) return String(exact.id);
+        const sameText = options.find(option => text(option.text) === rawValue);
+        if (sameText) return String(sameText.id);
+        const pick = (aliases: string[]): string | undefined => {
+          const hit = options.find(option => aliases.includes(text(option.text)));
+          return hit ? String(hit.id) : undefined;
+        };
+        if (['t', 'true', 'yes', '正确', '对', '√'].includes(rawValue)) return pick(['t', 'true', 'yes', '正确']);
+        if (['f', 'false', 'no', '错误', '错', '×'].includes(rawValue)) return pick(['f', 'false', 'no', '错误']);
+        if (['ni', 'no information', 'not given', '未提及'].includes(rawValue)) return pick(['ni', 'no information', 'not given']);
+        return undefined;
+      };
+      if (!options.length || !items.length) throw new Halt('AI_ANSWER', '判断题选项或句子为空');
+      return items.map((item, index) => {
+        const idx = String(item.idx);
+        const resolved = match(byId.get(idx)) ??
+          (rows.length === items.length ? match(rows[index]?.answer ?? rows[index]?.value) : undefined);
+        if (!resolved) throw new Halt('AI_ANSWER', `AI 返回的判断题答案缺失或不是有效选项（句子 ${idx}）`);
+        return { idx, answer: resolved };
+      });
     }
     if (task.kind === 'fill' && Number(object(q.extension).legacyType) === 11) {
       const ext = object(q.extension);

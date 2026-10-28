@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.4
+// @version      0.3.5
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -1996,11 +1996,31 @@ ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填空的 answer 必须使用选项中的 ID。" : ""}
 ${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
 ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个目标，全部项目都要分配。" : ""}
-${Number(ext.legacyType) === 22 ? "判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段。" : ""}
+${Number(ext.legacyType) === 22 ? "判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。" : ""}
 ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。" : ""}
 必须严格回答当前题目。`;
       const result = await answerWithAi(prompt, settings, signal);
-      return { ...task, value: this.validateAiValue(task, result) };
+      try {
+        return { ...task, value: this.validateAiValue(task, result) };
+      } catch (error) {
+        if (Number(ext.legacyType) === 22 && error instanceof Halt && error.code === "AI_ANSWER") {
+          const allowed = (Array.isArray(ext.options) ? ext.options : []).map((option) => {
+            const entry = object(option);
+            return { id: String(entry.id), text: String(entry.text ?? "") };
+          });
+          const retry = await answerWithAi(
+            `${prompt}
+
+上一次返回不符合要求：${JSON.stringify(result).slice(0, 800)}
+只能使用这些选项 id：${JSON.stringify(allowed)}
+请重新返回 {"fill":[{"idx":"句子ID","answer":"选项ID"}]}。`,
+            settings,
+            signal
+          );
+          return { ...task, value: this.validateAiValue(task, retry) };
+        }
+        throw error;
+      }
     }
     async transcribeQuestionAudio(c, audioIds, settings, signal) {
       if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "听力题需要 ASR：请先在面板填写 ASR API Key");
@@ -2033,15 +2053,35 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       }
       if (task.kind === "fill" && Number(object(q.extension).legacyType) === 22) {
         const ext = object(q.extension);
-        const optionIds = new Set((Array.isArray(ext.options) ? ext.options : []).map((option) => String(object(option).id)));
+        const options = (Array.isArray(ext.options) ? ext.options : []).map(object);
         const items = Array.isArray(task.value) ? task.value.map(object) : [];
-        const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
-        const byId = new Map(fill.map((entry) => [String(entry.idx), String(entry.answer ?? "")]));
-        if (!optionIds.size || !items.length || items.some((item) => {
-          const answer = byId.get(String(item.idx));
-          return !answer || !optionIds.has(answer);
-        })) throw new Halt("AI_ANSWER", "AI 返回的判断题答案缺失或不是有效选项");
-        return items.map((item) => ({ idx: String(item.idx), answer: byId.get(String(item.idx)) }));
+        const raw = [result.fill, result.judge, result.answers].find(Array.isArray);
+        const rows = (raw || []).map((entry) => typeof entry === "object" && entry !== null ? object(entry) : { answer: entry });
+        const byId = new Map(rows.map((row) => [String(row.idx ?? ""), row.answer ?? row.value]));
+        const text2 = (value2) => typeof value2 === "string" ? value2.trim().toLowerCase().replace(/[.。!！]/g, "") : typeof value2 === "boolean" ? value2 ? "true" : "false" : "";
+        const match = (value2) => {
+          const rawValue = text2(value2);
+          if (!rawValue) return void 0;
+          const exact = options.find((option) => String(option.id) === String(value2).trim());
+          if (exact) return String(exact.id);
+          const sameText = options.find((option) => text2(option.text) === rawValue);
+          if (sameText) return String(sameText.id);
+          const pick = (aliases) => {
+            const hit = options.find((option) => aliases.includes(text2(option.text)));
+            return hit ? String(hit.id) : void 0;
+          };
+          if (["t", "true", "yes", "正确", "对", "√"].includes(rawValue)) return pick(["t", "true", "yes", "正确"]);
+          if (["f", "false", "no", "错误", "错", "×"].includes(rawValue)) return pick(["f", "false", "no", "错误"]);
+          if (["ni", "no information", "not given", "未提及"].includes(rawValue)) return pick(["ni", "no information", "not given"]);
+          return void 0;
+        };
+        if (!options.length || !items.length) throw new Halt("AI_ANSWER", "判断题选项或句子为空");
+        return items.map((item, index) => {
+          const idx = String(item.idx);
+          const resolved = match(byId.get(idx)) ?? (rows.length === items.length ? match(rows[index]?.answer ?? rows[index]?.value) : void 0);
+          if (!resolved) throw new Halt("AI_ANSWER", `AI 返回的判断题答案缺失或不是有效选项（句子 ${idx}）`);
+          return { idx, answer: resolved };
+        });
       }
       if (task.kind === "fill" && Number(object(q.extension).legacyType) === 11) {
         const ext = object(q.extension);
@@ -2656,7 +2696,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.4";
+      this.el("version").textContent = false ? "dev" : "0.3.5";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -2866,7 +2906,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.4",
+        version: false ? "dev" : "0.3.5",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

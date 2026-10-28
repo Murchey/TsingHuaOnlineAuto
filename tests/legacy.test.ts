@@ -837,6 +837,37 @@ describe('legacy production route regression', () => {
     const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
     expect(value).toEqual([{ idx: 't-1', answer: 'i-2' }, { idx: 't-2', answer: 'i-1' }]);
   });
+<<<<<<< Updated upstream
+=======
+<<<<<<< HEAD
+  it('matches type 10 rows keyed by target text and answers written as descriptions', async () => {
+    const exercise: any = exercise10();
+    exercise.drag[0].styleContent = { paragraphs: [{ contentItems: [{ text: 'cheese-rolling' }] }] };
+    exercise.drag[1].styleContent = { paragraphs: [{ contentItems: [{ text: 'octopush' }] }] };
+    exercise.dragged[0].styleContent = { paragraphs: [{ contentItems: [{ text: 'a. an underwater form of hockey' }] }] };
+    exercise.dragged[1].styleContent = { paragraphs: [{ contentItems: [{ text: 'b. a sport popular in Southeast Asia' }] }] };
+    document.body.innerHTML = '<app-course-task-stu><lib-drag-drop-one-exercise-cs-study>' +
+      exercise.dragged.map((i: any) => '<div class="' + i.id + '"></div>').join('') +
+      '</lib-drag-drop-one-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const leaf: any = { status: 1, exercise, doRecord: { type: 10, answer: {} }, doRecordChange: { emit: vi.fn() },
+      drag(event: any) { this.doRecord.answer[event.container.id] = { id: event.container.id, choiceId: event.previousContainer.id, score: 0 }; } };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Match', doRecord: leaf.doRecord, loadDoRecord() {} };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ fill: [
+      { idx: 'cheese-rolling', answer: 'b. a sport popular in Southeast Asia' },
+      { idx: 'octopush', answer: 'a. an underwater form of hockey' },
+    ] });
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(value).toEqual([{ idx: 't-1', answer: 'i-2' }, { idx: 't-2', answer: 'i-1' }]);
+  });
+=======
+>>>>>>> a811ec0b3fa682298ced0ed2df121b5548a211ac
+>>>>>>> Stashed changes
   it('uses type 10 answers carried by the exercise without asking AI', async () => {
     const exercise: any = exercise10();
     exercise.drag[0].answer = 'i-2';

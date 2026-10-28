@@ -896,6 +896,15 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
       const items = (Array.isArray(ext.items) ? ext.items : []).map(object);
       const itemIds = new Set(items.map(item => String(item.id)));
       const targets = Array.isArray(task.value) ? task.value.map(object) : [];
+<<<<<<< Updated upstream
+=======
+<<<<<<< HEAD
+      const normalize = (value: unknown): string => typeof value === 'string' ?
+        value.trim().toLowerCase().replace(/^\(?([a-z])\)?[.):]?\s+/, '').replace(/[.。!！,，;；:：]+$/g, '')
+          .replace(/\s+/g, ' ') : '';
+=======
+>>>>>>> a811ec0b3fa682298ced0ed2df121b5548a211ac
+>>>>>>> Stashed changes
       const toRows = (raw: unknown): Record<string, unknown>[] => {
         if (Array.isArray(raw)) return raw.map(entry => {
           if (!entry || typeof entry !== 'object') return { answer: entry };
@@ -910,11 +919,37 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
       };
       const raw = [result.fill, result.matching, result.matches, result.pairs, result.answers, result.answer]
         .find(value => Array.isArray(value) || (!!value && typeof value === 'object'));
+<<<<<<< Updated upstream
+=======
+<<<<<<< HEAD
+      // Some models key rows by the visible target text instead of the target UUID.
+      const targetList = (Array.isArray(ext.targets) ? ext.targets : []).map(object);
+      const targetFor = (value: unknown): string | undefined => {
+        if (value == null) return undefined;
+        const text = String(value).trim();
+        if (!text) return undefined;
+        if (targetList.some(target => String(target.id) === text)) return text;
+        if (/^\d+$/.test(text)) {
+          const index = Number(text) - 1;
+          if (index >= 0 && index < targetList.length) return String(targetList[index].id);
+        }
+        const normalized = normalize(text);
+        const exact = targetList.find(target => normalize(target.text) === normalized);
+        return exact ? String(exact.id) : undefined;
+      };
+      const rows: Record<string, unknown>[] = toRows(raw).map(row => ({ ...row, idx: targetFor(row.idx) ?? row.idx }));
+      const byId = new Map(rows.map(row => [String(row.idx ?? ''), row.answer]));
+=======
+>>>>>>> Stashed changes
       const rows = toRows(raw);
       const byId = new Map(rows.map(row => [String(row.idx ?? ''), row.answer]));
       const normalize = (value: unknown): string => typeof value === 'string' ?
         value.trim().toLowerCase().replace(/^\(?([a-z])\)?[.):]?\s+/, '').replace(/[.。!！,，;；:：]+$/g, '')
           .replace(/\s+/g, ' ') : '';
+<<<<<<< Updated upstream
+=======
+>>>>>>> a811ec0b3fa682298ced0ed2df121b5548a211ac
+>>>>>>> Stashed changes
       const label = (value: unknown): string => {
         const text = typeof value === 'string' ? value.trim() : '';
         return /^\(?([a-z])\)?[.):]?(?:\s|$)/i.exec(text)?.[1]?.toLowerCase() ?? '';

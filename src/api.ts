@@ -17,6 +17,9 @@ function endpoint(base: string, path: string): string {
   return value.endsWith(path) ? value : value + path;
 }
 function timeoutOf(settings: Settings): number { return Math.min(180_000, Math.max(60_000, settings.timeoutMs)); }
+const MEDIA_TIMEOUT_MS = 600_000;
+const MEDIA_MAX_BYTES = 200 * 1024 * 1024;
+const MEDIA_MAX_DURATION_SECONDS = 20 * 60;
 function authHeaders(key: string, json = true): Record<string, string> {
   return { ...(json ? { 'Content-Type': 'application/json' } : {}), 'api-key': key, Authorization: `Bearer ${key}` };
 }
@@ -59,8 +62,9 @@ function gmRequest(options: RequestOptions, timeout: number, signal: AbortSignal
   });
 }
 
-async function request(options: RequestOptions, settings: Settings, signal: AbortSignal): Promise<GmResponse> {
-  const timeout = timeoutOf(settings);
+async function request(options: RequestOptions, settings: Settings, signal: AbortSignal,
+  timeoutOverride?: number): Promise<GmResponse> {
+  const timeout = timeoutOverride ?? timeoutOf(settings);
   try { return await gmRequest(options, timeout, signal); }
   catch (error) {
     if (signal.aborted || (error instanceof Halt && error.code !== 'API_GM')) throw error;
@@ -92,7 +96,10 @@ function parseJsonObject(text: string): unknown {
 function encodeBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  for (let index = 0; index < bytes.length; index++) binary += String.fromCharCode(bytes[index]);
+  const chunk = 0x8000; // 32 KB per apply keeps the main thread responsive for 5.6 MB chunks
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(index, index + chunk) as unknown as number[]);
+  }
   return btoa(binary);
 }
 
@@ -264,53 +271,70 @@ export async function transcribeAudio(audio: ArrayBuffer, filename: string, sett
 
 /** Download a large exercise asset through GM_xmlhttpRequest when available. */
 export async function fetchMedia(url: string, settings: Settings, signal: AbortSignal): Promise<ArrayBuffer> {
-  const response = await request({ url, method: 'GET', responseType: 'arraybuffer' }, settings, signal);
+  let response: GmResponse;
+  try {
+    // Media is much larger than an API JSON body; never reuse the API 60-180s budget.
+    response = await request({ url, method: 'GET', responseType: 'arraybuffer' }, settings, signal, MEDIA_TIMEOUT_MS);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    if (error instanceof Halt && (error.code === 'API_TIMEOUT' || error.code === 'TIMEOUT')) {
+      throw new Halt('MEDIA_TIMEOUT', '视频下载超过 10 分钟，请检查网络或改用手动作答');
+    }
+    throw error;
+  }
   const buffer = response.response;
-  if (buffer instanceof Blob) return buffer.arrayBuffer();
-  if (ArrayBuffer.isView(buffer)) {
-    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  let result: ArrayBuffer;
+  if (buffer instanceof Blob) result = await buffer.arrayBuffer();
+  else if (ArrayBuffer.isView(buffer)) {
+    result = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  } else if (buffer instanceof ArrayBuffer && buffer.byteLength) result = buffer;
+  else throw new Halt('MEDIA_DOWNLOAD', '媒体文件下载失败或为空');
+  if (result.byteLength > MEDIA_MAX_BYTES) {
+    throw new Halt('MEDIA_TOO_LARGE',
+      `视频超过 200 MB（${(result.byteLength / 1024 / 1024).toFixed(1)} MB），请改用手动作答`);
   }
-  if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength) {
-    throw new Halt('MEDIA_DOWNLOAD', '媒体文件下载失败或为空');
-  }
-  return buffer;
+  return result;
 }
 
 const ASR_SAMPLE_RATE = 16_000;
 const ASR_CHUNK_BYTES = 5_600_000; // ~7.5 MB after base64, below MiMo ASR's 10 MB limit
 
-function audioContext(): any {
+function offlineAudioContext(): any {
   const scope = ((globalThis as any).unsafeWindow ?? globalThis) as any;
-  return scope.AudioContext || scope.webkitAudioContext || (globalThis as any).AudioContext;
+  return scope.OfflineAudioContext || scope.webkitOfflineAudioContext || (globalThis as any).OfflineAudioContext;
 }
 
 async function decodeVideoAudio(video: ArrayBuffer): Promise<AudioBuffer> {
-  const Ctor = audioContext();
-  if (typeof Ctor !== 'function') throw new Halt('VIDEO_AUDIO', '浏览器不支持视频音轨解码');
-  const context = new Ctor();
+  const Ctor = offlineAudioContext();
+  if (typeof Ctor !== 'function') throw new Halt('VIDEO_AUDIO', '浏览器不支持离线音轨解码');
+  // Chivox already owns several hardware AudioContexts; a seventh can throw. An
+  // OfflineAudioContext also lets the browser resample to 16 kHz in native code instead
+  // of the previous per-sample JS interpolation loop.
+  const context = new Ctor(1, 1, ASR_SAMPLE_RATE);
   try {
     return await context.decodeAudioData(video.slice(0));
   } catch {
     throw new Halt('VIDEO_AUDIO', '视频音轨解码失败，请确认视频为 MP4/MOV 且包含音频');
   } finally {
-    try { await context.close(); } catch { /* ignore */ }
+    try { context.close?.(); } catch { /* offline contexts may not implement close */ }
   }
 }
 
 function videoToPcm(audio: AudioBuffer, sampleRate = ASR_SAMPLE_RATE): Int16Array {
+  if (audio.sampleRate !== sampleRate) {
+    throw new Halt('VIDEO_AUDIO', `视频音轨采样率为 ${audio.sampleRate} Hz，浏览器未按 16 kHz 解码`);
+  }
   const channels = audio.numberOfChannels;
   const first = audio.getChannelData(0);
   const second = channels > 1 ? audio.getChannelData(1) : null;
-  const duration = Number.isFinite(audio.duration) ? audio.duration : audio.length / audio.sampleRate;
-  const length = Math.max(0, Math.ceil(duration * sampleRate));
+  const length = audio.length;
   const out = new Int16Array(length);
-  const step = audio.sampleRate / sampleRate;
   let energy = 0;
+  // decodeAudioData on the 16 kHz OfflineAudioContext already resampled natively;
+  // only a cheap mono downmix remains here.
   for (let i = 0; i < length; i++) {
-    const position = i * step, left = Math.floor(position), right = Math.min(left + 1, first.length - 1);
-    const fraction = position - left;
-    let sample = first[left] * (1 - fraction) + first[right] * fraction;
-    if (second) sample = (sample + second[left] * (1 - fraction) + second[right] * fraction) / 2;
+    let sample = first[i];
+    if (second) sample = (sample + second[i]) / 2;
     sample = Math.max(-1, Math.min(1, sample));
     energy += sample * sample;
     out[i] = sample * 0x7fff;
@@ -335,19 +359,32 @@ function pcmToWav(pcm: Int16Array, sampleRate = ASR_SAMPLE_RATE): ArrayBuffer {
   return buffer;
 }
 
+function yieldMainThread(): Promise<void> {
+  const scheduler = (globalThis as any).scheduler;
+  if (scheduler && typeof scheduler.yield === 'function') return scheduler.yield();
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 /** Convert a video's audio track to 16 kHz mono WAV chunks and transcribe it with the configured ASR. */
 export async function transcribeVideo(video: ArrayBuffer, filename: string, settings: Settings,
-  signal: AbortSignal): Promise<string> {
+  signal: AbortSignal, onProgress?: (message: string) => void): Promise<string> {
   if (!settings.asrApiKey.trim()) throw new Halt('ASR_CONFIG', '视频题需要 ASR：请先在面板填写 ASR API Key');
   const audio = await decodeVideoAudio(video);
+  if (Number.isFinite(audio.duration) && audio.duration > MEDIA_MAX_DURATION_SECONDS) {
+    throw new Halt('VIDEO_TOO_LONG',
+      `视频超过 20 分钟（${Math.round(audio.duration)} 秒），请改用手动作答`);
+  }
   const pcm = videoToPcm(audio);
   const perChunk = Math.max(1, Math.floor(ASR_CHUNK_BYTES / 2));
+  const chunkCount = Math.max(1, Math.ceil(pcm.length / perChunk));
   const texts: string[] = [];
   const stem = filename.replace(/\.[^.]+$/, '') || 'video';
   for (let start = 0, index = 0; start < pcm.length; start += perChunk, index++) {
     check(signal);
+    onProgress?.(`正在转写视频音频第 ${index + 1}/${chunkCount} 段…`);
     const chunk = pcm.subarray(start, Math.min(start + perChunk, pcm.length));
     texts.push(await transcribeAudio(pcmToWav(chunk), `${stem}-${index + 1}.wav`, settings, signal));
+    if (index + 1 < chunkCount) await yieldMainThread();
   }
   return texts.map(text => text.trim()).filter(Boolean).join('\n');
 }

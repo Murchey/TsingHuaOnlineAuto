@@ -524,13 +524,22 @@ describe('legacy production route regression', () => {
     const unit = adapter.discover()[0];
     const task = planTasks(legacyData({ exercise: exercise20, submitNum: 0, doRecord: c.doRecord }), { allowMissing: true })[0];
     vi.mocked(fetchMedia).mockResolvedValue(new ArrayBuffer(8));
-    vi.mocked(transcribeVideo).mockResolvedValue('First, roll the cheese. Then, run after it.');
+    vi.mocked(transcribeVideo).mockImplementation(async (_video, _filename, _settings, _signal, onProgress) => {
+      onProgress?.('正在转写视频音频第 1/1 段…');
+      return 'First, roll the cheese. Then, run after it.';
+    });
     vi.mocked(answerWithAi).mockResolvedValue({ answer: 'AI video answer' });
+    const progress = vi.fn();
+    adapter.onProgress = progress;
     const settings = { ...defaults, aiAnswers: true, aiApiKey: 'ai-key', asrApiKey: 'asr-key' };
     await adapter.fill(unit, task, settings, signal());
     expect(getResUrl).toHaveBeenCalledWith('video-res', 1);
     expect(fetchMedia).toHaveBeenCalledWith('https://cdn.example/video-res-1.mp4', settings, expect.anything());
-    expect(transcribeVideo).toHaveBeenCalledWith(expect.any(ArrayBuffer), 'question-0.mp4', settings, expect.anything());
+    expect(transcribeVideo).toHaveBeenCalledWith(expect.any(ArrayBuffer), 'question-0.mp4', settings,
+      expect.anything(), expect.any(Function));
+    expect(progress).toHaveBeenCalledWith('正在下载视频题目资源…');
+    expect(progress).toHaveBeenCalledWith('视频已下载（1 MB），正在处理音轨…');
+    expect(progress).toHaveBeenCalledWith('正在转写视频音频第 1/1 段…');
     const prompt = vi.mocked(answerWithAi).mock.calls[0][0] as string;
     expect(prompt).toContain('First, roll the cheese. Then, run after it.');
     expect(prompt).toContain('本题包含视频');

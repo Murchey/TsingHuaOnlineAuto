@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { answerWithAi, fetchImage, synthesizeSpeech, transcribeAudio, transcribeVideo } from '../src/api';
+import { answerWithAi, fetchImage, fetchMedia, synthesizeSpeech, transcribeAudio, transcribeVideo } from '../src/api';
 import { defaults, type Settings } from '../src/model';
 
 const signal = () => new AbortController().signal;
@@ -95,6 +95,22 @@ it('downloads an exercise image and sniffs its MIME type from the bytes', async 
   expect(image?.data).toBe(Buffer.from(new Uint8Array(png)).toString('base64'));
   expect(calls[0]).toMatchObject({ method: 'GET', responseType: 'arraybuffer' });
 });
+it('encodes large media with 32 KB String.fromCharCode chunks', async () => {
+  const bytes = new Uint8Array(100_000);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = index % 256;
+  vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
+    details.onload({ status: 200, response: bytes.buffer }); return { abort: vi.fn() };
+  });
+  const image = await fetchImage('https://cdn.example/large.jpg', cfg(), signal());
+  expect(image?.data).toBe(Buffer.from(bytes).toString('base64'));
+});
+it('maps a media download timeout to a clear manual-answer message', async () => {
+  vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
+    details.ontimeout(); return { abort: vi.fn() };
+  });
+  await expect(fetchMedia('https://cdn.example/video.mp4', cfg(), signal()))
+    .rejects.toThrow('视频下载超过 10 分钟');
+});
 it('accepts an inline data URI image without a network request', async () => {
   const gm = vi.fn();
   vi.stubGlobal('GM_xmlhttpRequest', gm);
@@ -102,25 +118,29 @@ it('accepts an inline data URI image without a network request', async () => {
     .resolves.toEqual({ mime: 'image/jpeg', data: 'QUJD' });
   expect(gm).not.toHaveBeenCalled();
 });
-it('decodes a video audio track to a 16 kHz WAV before MiMo ASR', async () => {
+it('decodes a video audio track with a 16 kHz OfflineAudioContext before MiMo ASR', async () => {
   class FakeAudioBuffer {
     duration = 1; sampleRate = 16000; length = 16000; numberOfChannels = 1;
     getChannelData() { const data = new Float32Array(16000); data.fill(0.1); return data; }
   }
-  class FakeAudioContext {
+  const contexts: any[] = [];
+  class FakeOfflineAudioContext {
     decodeAudioData = vi.fn(async () => new FakeAudioBuffer());
     close = vi.fn(async () => undefined);
+    constructor(...args: any[]) { contexts.push(args); }
   }
-  vi.stubGlobal('AudioContext', FakeAudioContext);
-  const calls: any[] = [];
+  vi.stubGlobal('OfflineAudioContext', FakeOfflineAudioContext);
+  const calls: any[] = [], progress = vi.fn();
   vi.stubGlobal('GM_xmlhttpRequest', (details: any) => {
     calls.push(details);
     details.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'video transcript' } }] }) });
     return { abort: vi.fn() };
   });
   await expect(transcribeVideo(new ArrayBuffer(8), 'q.mp4',
-    cfg({ asrApiKey: 'k', asrApiBase: 'https://api.xiaomimimo.com/v1', asrModel: 'mimo-v2.5-asr' }), signal()))
+    cfg({ asrApiKey: 'k', asrApiBase: 'https://api.xiaomimimo.com/v1', asrModel: 'mimo-v2.5-asr' }), signal(), progress))
     .resolves.toBe('video transcript');
+  expect(contexts[0]).toEqual([1, 1, 16000]);
+  expect(progress).toHaveBeenCalledWith('正在转写视频音频第 1/1 段…');
   const part = JSON.parse(calls[0].data).messages[0].content[0];
   expect(part.type).toBe('input_audio');
   expect(part.input_audio.format).toBe('wav');

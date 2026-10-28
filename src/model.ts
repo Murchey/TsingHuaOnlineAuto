@@ -79,6 +79,7 @@ export class Halt extends Error {
 }
 
 export interface Adapter {
+  onProgress?: (message: string) => void;
   discover(): Unit[];
   assertContext(unit: Unit): void;
   load(unit: Unit, signal: AbortSignal): Promise<ExerciseData>;

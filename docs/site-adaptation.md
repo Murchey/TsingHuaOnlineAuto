@@ -38,6 +38,8 @@ type 8 实际为 `LIB-ORAL-BRIEF-EXERCISE-CS-STUDY` 口语简答，不是 textar
 - 站点重置某关答案但保留 `submitNum`（服务器上没有任何完整作答）时，已校验 checkpoint 会自动清理并重新作答；服务器记录完全消失仍以 `RECORD_CHANGED` 暂停。
 - MiMo ASR 使用 `/chat/completions`，user content 仅含 `input_audio`；OpenAI 兼容 ASR 仍走 multipart `/audio/transcriptions`。
 
+0.4.3 优化视频处理：Chivox 已占用多个硬件 AudioContext，继续 `new AudioContext()` 可能抛错；改用 `new OfflineAudioContext(1, 1, 16000)` 的 `decodeAudioData`，浏览器原生重采样到 16 kHz，`videoToPcm` 只做单声道下混，不再做逐样本插值。Base64 编码改为每 32 KB `String.fromCharCode.apply`，5.6 MB 分块不再长时间占用主线程。媒体下载使用独立 `MEDIA_TIMEOUT_MS=600000`，并限制 200 MB 与 20 分钟，超限抛出 `MEDIA_TOO_LARGE`/`VIDEO_TOO_LONG` 明确提示手动作答。`LegacyAdapter.onProgress` 由控制器绑定面板消息，依次显示“正在下载视频题目资源…”“视频已下载（N MB），正在处理音轨…”“正在转写视频音频第 i/n 段…”；分块间 `yieldMainThread()`，组合题共用视频通过 `videoJobs` 并发去重。
+
 0.4.2 修复看图填词/标注题：旧版 type 3 的 `fillBlanks[].group` 是图片中的编号，`content.paragraphs` 只有空位而没有句子文本。`legacy-data.ts` 现在保留 `extension.blanks[].group`；`aiTask` 把 `number` 写入空位 JSON，并识别“仅有空位、无周围句子”的图片标注题（`imageOnlyBlanks`）。`cropImage` 自动把原图裁成左侧/中部/右侧 3 张重叠放大图（3x），让编号线端点更清晰；提示词要求模型先读取图片词库、为每个编号写 `observations`，再返回 `words` 和 `fill`；`validateAiValue` 用 `result.words` 校验答案必须来自词库、重复次数不能超过词库本身，失败自动重试一次。`answerWithAi` 对 MiMo 设置 `thinking: {type:"disabled"}` 与 `max_completion_tokens: 4000`，避免深度思考耗尽预算导致 content 为空。
 
 0.4.1 修复闯关结果弹窗：站点的第二个按钮文本由分数决定，可能是 `Review` 或 `Continue`；`Continue` 触发 `closeChallengeModal(3/4)` → `reChallengeChange` → `loadPage()`，会刷新目录/解锁下一关，而右上角关闭只发出 2，不等价。适配器现在优先查找并点击 `Continue`/`继续` 按钮，等待弹窗关闭和目录刷新；课程页顶部的 `button.btn`“继续学习”（`continueStudy()` → `router.navigate(course.continueKey)`，带 `dis-continue-btn` 时跳过）也会优先点击；只有没有 Continue 时才沿用 Rechallenge/关闭逻辑。失败弹窗如果只有 Continue（例如已有 `lastScore`），也会点击 Continue，不再误报“未找到 Rechallenge 按钮”。

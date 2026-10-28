@@ -123,7 +123,7 @@
 - 图片下载后按 PNG/JPEG/GIF/WebP 字节头识别 MIME，转 base64；最多随请求发送 4 张，单张上限 8 MB。请求格式与 MiMo 官方文档一致：`image_url: { url: "data:<mime>;base64,..." }`。
 - 听力+图片：先使用题目 `audioScript` 或 ASR 转写，再把转写、整页文本、选项/空位和图片一起交给多模态模型；提示词要求以图片中的文字和页面文本为准。
 - 图片解析或下载失败时提示模型“图片读取失败，只依据文本作答”，不暂停练习；若模型不支持图片并返回 HTTP 400/413/415/422，自动重试一次纯文本请求。
-- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 125 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
+- 自动验证：`npm run check` 类型检查、构建和 Vitest 共 127 项通过；覆盖多模态请求体、图片字节 MIME、data URI、听力+图片先 ASR、资源 ID 回退和图片失败降级。
 - **待真实验收：** 在正式脚本管理器中用已配置的 MiMo 视觉模型（`mimo-v2.6-flash`/pro）对真实看图写话和听力+图片题各提交一次，确认模型实际读取了图片而非仅凭文本猜测。
 
 
@@ -171,3 +171,11 @@
 - 图片放大验证：整图直接作答在右侧 13-17 有错位；按左/中/右裁切放大后，左侧 1-4、中部 5-12 和右半 13-17 的编号跟随明显更准确。脚本现在自动生成 3 张重叠放大图（`cropImage`）随请求发送；若浏览器无法裁切则回退到整图。
 - 自动验证：新增图片标注词库校验、自创词重试、MiMo thinking 关闭/4000 tokens 三项用例；`npm run check` 共 125 项通过。
 - **待真实验收：** 更新 0.4.2 后在 344a4 题运行一次，确认 17 个空位按图片词库写入并 Submit 成功；当前接口级流程已验证。
+
+## 0.4.3 视频解码、Base64、下载与进度
+
+- OfflineAudioContext 实测：`new OfflineAudioContext(1,1,16000).decodeAudioData(mp4)` 返回 `sampleRate=16000`、`channels=2`、`length=48669`、`duration=3.0418125`，证明浏览器已原生重采样，后续只做单声道下混。
+- Base64：改为 32 KB `String.fromCharCode.apply`；100 KB 单测输出与 `Buffer.from(bytes).toString('base64')` 完全一致。
+- 媒体预算：`fetchMedia` 使用 600 秒独立超时；超过 200 MB 抛 `MEDIA_TOO_LARGE`，视频超过 20 分钟抛 `VIDEO_TOO_LONG`，均提示改手动作答；超时映射为 `MEDIA_TIMEOUT`。
+- 进度：控制器把 `adapter.onProgress` 绑定到面板 message；视频依次显示下载、已下载大小/处理音轨、第 i/n 段转写；分块间让出主线程；`videoJobs` 对共用视频的并发任务去重。
+- 自动验证：新增 OfflineAudioContext 构造参数/16 kHz 断言、32 KB Base64 一致性、媒体超时提示、视频进度消息等用例；`npm run check` 共 127 项通过。

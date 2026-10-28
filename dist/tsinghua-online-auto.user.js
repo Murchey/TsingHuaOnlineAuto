@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.4.2
+// @version      0.4.3
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -792,6 +792,9 @@
   function timeoutOf(settings) {
     return Math.min(18e4, Math.max(6e4, settings.timeoutMs));
   }
+  var MEDIA_TIMEOUT_MS = 6e5;
+  var MEDIA_MAX_BYTES = 200 * 1024 * 1024;
+  var MEDIA_MAX_DURATION_SECONDS = 20 * 60;
   function authHeaders(key2, json = true) {
     return { ...json ? { "Content-Type": "application/json" } : {}, "api-key": key2, Authorization: `Bearer ${key2}` };
   }
@@ -851,8 +854,8 @@
       signal.addEventListener("abort", abort, { once: true });
     });
   }
-  async function request(options, settings, signal) {
-    const timeout = timeoutOf(settings);
+  async function request(options, settings, signal, timeoutOverride) {
+    const timeout = timeoutOverride ?? timeoutOf(settings);
     try {
       return await gmRequest(options, timeout, signal);
     } catch (error) {
@@ -885,7 +888,10 @@
   function encodeBase64(buffer) {
     const bytes = new Uint8Array(buffer);
     let binary = "";
-    for (let index = 0; index < bytes.length; index++) binary += String.fromCharCode(bytes[index]);
+    const chunk = 32768;
+    for (let index = 0; index < bytes.length; index += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(index, index + chunk));
+    }
     return btoa(binary);
   }
   function decodeBase64(value) {
@@ -1066,52 +1072,65 @@
     return text2.trim();
   }
   async function fetchMedia(url, settings, signal) {
-    const response = await request({ url, method: "GET", responseType: "arraybuffer" }, settings, signal);
+    let response;
+    try {
+      response = await request({ url, method: "GET", responseType: "arraybuffer" }, settings, signal, MEDIA_TIMEOUT_MS);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      if (error instanceof Halt && (error.code === "API_TIMEOUT" || error.code === "TIMEOUT")) {
+        throw new Halt("MEDIA_TIMEOUT", "视频下载超过 10 分钟，请检查网络或改用手动作答");
+      }
+      throw error;
+    }
     const buffer = response.response;
-    if (buffer instanceof Blob) return buffer.arrayBuffer();
-    if (ArrayBuffer.isView(buffer)) {
-      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    let result;
+    if (buffer instanceof Blob) result = await buffer.arrayBuffer();
+    else if (ArrayBuffer.isView(buffer)) {
+      result = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    } else if (buffer instanceof ArrayBuffer && buffer.byteLength) result = buffer;
+    else throw new Halt("MEDIA_DOWNLOAD", "媒体文件下载失败或为空");
+    if (result.byteLength > MEDIA_MAX_BYTES) {
+      throw new Halt(
+        "MEDIA_TOO_LARGE",
+        `视频超过 200 MB（${(result.byteLength / 1024 / 1024).toFixed(1)} MB），请改用手动作答`
+      );
     }
-    if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength) {
-      throw new Halt("MEDIA_DOWNLOAD", "媒体文件下载失败或为空");
-    }
-    return buffer;
+    return result;
   }
   var ASR_SAMPLE_RATE = 16e3;
   var ASR_CHUNK_BYTES = 56e5;
-  function audioContext() {
+  function offlineAudioContext() {
     const scope = globalThis.unsafeWindow ?? globalThis;
-    return scope.AudioContext || scope.webkitAudioContext || globalThis.AudioContext;
+    return scope.OfflineAudioContext || scope.webkitOfflineAudioContext || globalThis.OfflineAudioContext;
   }
   async function decodeVideoAudio(video) {
-    const Ctor = audioContext();
-    if (typeof Ctor !== "function") throw new Halt("VIDEO_AUDIO", "浏览器不支持视频音轨解码");
-    const context = new Ctor();
+    const Ctor = offlineAudioContext();
+    if (typeof Ctor !== "function") throw new Halt("VIDEO_AUDIO", "浏览器不支持离线音轨解码");
+    const context = new Ctor(1, 1, ASR_SAMPLE_RATE);
     try {
       return await context.decodeAudioData(video.slice(0));
     } catch {
       throw new Halt("VIDEO_AUDIO", "视频音轨解码失败，请确认视频为 MP4/MOV 且包含音频");
     } finally {
       try {
-        await context.close();
+        context.close?.();
       } catch {
       }
     }
   }
   function videoToPcm(audio, sampleRate = ASR_SAMPLE_RATE) {
+    if (audio.sampleRate !== sampleRate) {
+      throw new Halt("VIDEO_AUDIO", `视频音轨采样率为 ${audio.sampleRate} Hz，浏览器未按 16 kHz 解码`);
+    }
     const channels = audio.numberOfChannels;
     const first = audio.getChannelData(0);
     const second = channels > 1 ? audio.getChannelData(1) : null;
-    const duration = Number.isFinite(audio.duration) ? audio.duration : audio.length / audio.sampleRate;
-    const length = Math.max(0, Math.ceil(duration * sampleRate));
+    const length = audio.length;
     const out = new Int16Array(length);
-    const step = audio.sampleRate / sampleRate;
     let energy = 0;
     for (let i = 0; i < length; i++) {
-      const position = i * step, left = Math.floor(position), right = Math.min(left + 1, first.length - 1);
-      const fraction = position - left;
-      let sample = first[left] * (1 - fraction) + first[right] * fraction;
-      if (second) sample = (sample + second[left] * (1 - fraction) + second[right] * fraction) / 2;
+      let sample = first[i];
+      if (second) sample = (sample + second[i]) / 2;
       sample = Math.max(-1, Math.min(1, sample));
       energy += sample * sample;
       out[i] = sample * 32767;
@@ -1142,17 +1161,31 @@
     new Int16Array(buffer, 44).set(pcm);
     return buffer;
   }
-  async function transcribeVideo(video, filename, settings, signal) {
+  function yieldMainThread() {
+    const scheduler = globalThis.scheduler;
+    if (scheduler && typeof scheduler.yield === "function") return scheduler.yield();
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  async function transcribeVideo(video, filename, settings, signal, onProgress) {
     if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "视频题需要 ASR：请先在面板填写 ASR API Key");
     const audio = await decodeVideoAudio(video);
+    if (Number.isFinite(audio.duration) && audio.duration > MEDIA_MAX_DURATION_SECONDS) {
+      throw new Halt(
+        "VIDEO_TOO_LONG",
+        `视频超过 20 分钟（${Math.round(audio.duration)} 秒），请改用手动作答`
+      );
+    }
     const pcm = videoToPcm(audio);
     const perChunk = Math.max(1, Math.floor(ASR_CHUNK_BYTES / 2));
+    const chunkCount = Math.max(1, Math.ceil(pcm.length / perChunk));
     const texts = [];
     const stem = filename.replace(/\.[^.]+$/, "") || "video";
     for (let start = 0, index = 0; start < pcm.length; start += perChunk, index++) {
       check(signal);
+      onProgress?.(`正在转写视频音频第 ${index + 1}/${chunkCount} 段…`);
       const chunk = pcm.subarray(start, Math.min(start + perChunk, pcm.length));
       texts.push(await transcribeAudio(pcmToWav(chunk), `${stem}-${index + 1}.wav`, settings, signal));
+      if (index + 1 < chunkCount) await yieldMainThread();
     }
     return texts.map((text2) => text2.trim()).filter(Boolean).join("\n");
   }
@@ -1590,9 +1623,11 @@
     constructor(components2 = legacyComponents) {
       this.components = components2;
     }
+    onProgress;
     rechallengeCounts = /* @__PURE__ */ new Map();
     visited = /* @__PURE__ */ new Set();
     transcripts = /* @__PURE__ */ new Map();
+    videoJobs = /* @__PURE__ */ new Map();
     discover() {
       if (!legacyRoute()) return [];
       return this.components().filter(({ component: c, root }) => root.matches("app-course-task-stu") && shown(root) && root.isConnected && typeof c.loadDoRecord === "function" && /^[\w-]+$/.test(String(c.pageId || ""))).map(({ component: c, root }) => ({
@@ -2494,16 +2529,39 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         subscription?.unsubscribe();
       }
     }
+    progress(message) {
+      try {
+        this.onProgress?.(message);
+      } catch {
+      }
+    }
     async transcribeQuestionVideo(c, videoIds, settings, signal) {
       if (!settings.asrApiKey.trim()) throw new Halt("ASR_CONFIG", "视频题需要 ASR：请先在面板填写 ASR API Key");
       const key2 = "video:" + videoIds.join(",");
       const cached = this.transcripts.get(key2);
       if (cached) return cached;
+      const running = this.videoJobs.get(key2);
+      if (running) return running;
+      const job = this.doTranscribeVideo(c, videoIds, settings, signal).finally(() => this.videoJobs.delete(key2));
+      this.videoJobs.set(key2, job);
+      return job;
+    }
+    async doTranscribeVideo(c, videoIds, settings, signal) {
+      const key2 = "video:" + videoIds.join(",");
       const transcripts = [];
       for (let index = 0; index < videoIds.length; index++) {
+        this.progress("正在下载视频题目资源…");
         const url = await this.resolveVideoUrl(c, { id: `video-${index}`, video: videoIds[index] }, settings, signal);
         const video = await fetchMedia(url, settings, signal);
-        transcripts.push(await transcribeVideo(video, `question-${index}.mp4`, settings, signal));
+        const megabyte = Math.max(1, Math.round(video.byteLength / 1024 / 1024));
+        this.progress(`视频已下载（${megabyte} MB），正在处理音轨…`);
+        transcripts.push(await transcribeVideo(
+          video,
+          `question-${index}.mp4`,
+          settings,
+          signal,
+          (message) => this.progress(message)
+        ));
       }
       const result = [...new Set(transcripts.filter(Boolean))].join("\n");
       if (this.transcripts.size >= 100) this.transcripts.clear();
@@ -3119,6 +3177,9 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       this.abort = new AbortController();
       this.stopStatus = "paused";
       const signal = this.abort.signal;
+      this.adapter.onProgress = (message) => {
+        if (!signal.aborted) this.update({ phase: "媒体", message });
+      };
       this.update({ status: "running", completed: 0, total: 0, unitsDone: 0, unitsTotal: 0, pending: [], type: "", phase: "检查" });
       try {
         await this.withLock(selected.key.split(":").slice(0, -2).join(":"), async () => {
@@ -3176,6 +3237,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
           this.report(halt.code, halt.message, true);
         }
       } finally {
+        this.adapter.onProgress = void 0;
         this.active = false;
         this.emit();
       }
@@ -3352,7 +3414,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.4.2";
+      this.el("version").textContent = false ? "dev" : "0.4.3";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -3562,7 +3624,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.4.2",
+        version: false ? "dev" : "0.4.3",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

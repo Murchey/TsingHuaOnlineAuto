@@ -13,9 +13,11 @@ export function legacyRoute(): boolean {
 }
 
 export class LegacyAdapter implements Adapter {
+  onProgress?: (message: string) => void;
   private rechallengeCounts = new Map<string, number>();
   private visited = new Set<string>();
   private transcripts = new Map<string, string>();
+  private videoJobs = new Map<string, Promise<string>>();
   constructor(private components = legacyComponents) {}
   discover(): Unit[] {
     if (!legacyRoute()) return [];
@@ -926,17 +928,38 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
     } finally { subscription?.unsubscribe(); }
   }
 
+  private progress(message: string): void {
+    try { this.onProgress?.(message); } catch { /* UI only */ }
+  }
+
   private async transcribeQuestionVideo(c: LegacyComponent, videoIds: string[], settings: Settings,
     signal: AbortSignal): Promise<string> {
     if (!settings.asrApiKey.trim()) throw new Halt('ASR_CONFIG', '视频题需要 ASR：请先在面板填写 ASR API Key');
     const key = 'video:' + videoIds.join(',');
     const cached = this.transcripts.get(key);
     if (cached) return cached;
+    // A composite page can hand the same parent video to several child questions. Share
+    // the in-flight download/decode/ASR job instead of launching duplicate work.
+    const running = this.videoJobs.get(key);
+    if (running) return running;
+    const job = this.doTranscribeVideo(c, videoIds, settings, signal)
+      .finally(() => this.videoJobs.delete(key));
+    this.videoJobs.set(key, job);
+    return job;
+  }
+
+  private async doTranscribeVideo(c: LegacyComponent, videoIds: string[], settings: Settings,
+    signal: AbortSignal): Promise<string> {
+    const key = 'video:' + videoIds.join(',');
     const transcripts: string[] = [];
     for (let index = 0; index < videoIds.length; index++) {
+      this.progress('正在下载视频题目资源…');
       const url = await this.resolveVideoUrl(c, { id: `video-${index}`, video: videoIds[index] }, settings, signal);
       const video = await fetchMedia(url, settings, signal);
-      transcripts.push(await transcribeVideo(video, `question-${index}.mp4`, settings, signal));
+      const megabyte = Math.max(1, Math.round(video.byteLength / 1024 / 1024));
+      this.progress(`视频已下载（${megabyte} MB），正在处理音轨…`);
+      transcripts.push(await transcribeVideo(video, `question-${index}.mp4`, settings, signal,
+        message => this.progress(message)));
     }
     const result = [...new Set(transcripts.filter(Boolean))].join('\n');
     if (this.transcripts.size >= 100) this.transcripts.clear();

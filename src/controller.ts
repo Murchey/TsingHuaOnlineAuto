@@ -64,6 +64,7 @@ export class Controller {
     if (this.active) return;
     this.active = true; this.abort = new AbortController(); this.stopStatus = 'paused';
     const signal = this.abort.signal;
+    this.adapter.onProgress = message => { if (!signal.aborted) this.update({ phase: '媒体', message }); };
     this.update({ status: 'running', completed: 0, total: 0, unitsDone: 0, unitsTotal: 0, pending: [], type: '', phase: '检查' });
     try {
       await this.withLock(selected.key.split(':').slice(0, -2).join(':'), async () => {
@@ -120,7 +121,7 @@ export class Controller {
         }
       }
       else { this.update({ status: 'paused' }); this.report(halt.code, halt.message, true); }
-    } finally { this.active = false; this.emit(); }
+    } finally { this.adapter.onProgress = undefined; this.active = false; this.emit(); }
   }
 
   private async runUnit(unit: Unit, settings: Settings, signal: AbortSignal): Promise<void> {

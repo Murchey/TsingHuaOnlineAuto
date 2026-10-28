@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         清华社英语在线练习助手
 // @namespace    local.tsinghua-online-auto
-// @version      0.3.6
+// @version      0.3.7
 // @description  日常练习连续答题、AI/ASR/TTS 可配置接口、oral-brief VOD 上传、原题音频 Chivox 评测、unsafeWindow 桥接
 // @match        https://www.tsinghuaelt.com/*
 // @match        https://tsinghuaelt.com/*
@@ -153,6 +153,16 @@
       }
       return { question: q, kind: "choice", value: q.type === "choice_multiple" ? values : values[0] };
     }
+    if (q.type === "legacy_10") {
+      const targets = object(q.extension).targets;
+      if (!Array.isArray(targets) || !targets.length) throw new Halt("DATA_SHAPE", `匹配题 ${q.id} 的目标缺失`);
+      const saved = Array.isArray(answer) ? answer.map(object) : [];
+      return { question: q, kind: "fill", value: targets.map((target) => {
+        const idx = String(object(target).id);
+        const match = saved.find((entry) => String(entry.idx) === idx);
+        return { idx, answer: match && typeof match.val === "string" ? match.val : "" };
+      }) };
+    }
     if (q.type === "legacy_22") {
       const items = object(q.extension).items;
       if (!Array.isArray(items) || !items.length) throw new Halt("DATA_SHAPE", `判断题 ${q.id} 的句子缺失`);
@@ -236,6 +246,7 @@
   function canonical(q, value) {
     const v = q.type === "choice_single" || q.type === "judge_basic" ? value : parse(value);
     if (q.type === "choice_multiple") return Array.isArray(v) ? [...v].sort() : v;
+    if (q.type === "legacy_10") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type === "legacy_22") return Array.isArray(v) ? v.map(object).map((a) => ({ idx: a.idx, answer: a.answer })).sort((a, b) => String(a.idx).localeCompare(String(b.idx))) : v;
     if (q.type === "legacy_11") return Array.isArray(v) ? v.map(object).map((group) => ({
       idx: group.idx,
@@ -289,6 +300,20 @@
       if (answeredIds.size !== answers.length || [...answeredIds].some((idx) => !itemById.has(idx))) return false;
       const expected = items.filter((item) => String(object(item).roleId ?? "") === roleId);
       return expected.length > 0 && expected.every((item) => answeredIds.has(String(object(item).idx)));
+    }
+    if (q.type === "legacy_10") {
+      const targets = object(q.extension).targets, items = object(q.extension).items;
+      const targetIds = new Set((Array.isArray(targets) ? targets : []).map((target) => String(object(target).id)));
+      const itemIds = new Set((Array.isArray(items) ? items : []).map((item) => String(object(item).id)));
+      if (!targetIds.size || !itemIds.size || !Array.isArray(v) || v.length !== targetIds.size) return false;
+      const answers = v.map(object), seenTargets = /* @__PURE__ */ new Set(), seenItems = /* @__PURE__ */ new Set();
+      return answers.every((entry) => {
+        const idx = String(entry.idx), answer = String(entry.answer ?? "");
+        if (!targetIds.has(idx) || seenTargets.has(idx) || !itemIds.has(answer) || seenItems.has(answer)) return false;
+        seenTargets.add(idx);
+        seenItems.add(answer);
+        return true;
+      });
     }
     if (q.type === "legacy_22") {
       const items = object(q.extension).items, options = object(q.extension).options;
@@ -1074,6 +1099,26 @@
       }
       q.type = "legacy_11";
       q.extension = { legacyType: 11, targets, items };
+    } else if (type === 10) {
+      const targets = arrayField(e, "drag").map((value) => {
+        const target = object(value);
+        const answer = Array.isArray(target.answer) ? target.answer[0] : target.answer ?? target.choiceId;
+        return {
+          id: String(target.id ?? ""),
+          text: richText(target.styleContent) || String(target.content ?? ""),
+          answer: String(answer ?? "")
+        };
+      });
+      const items = arrayField(e, "dragged").map((value) => {
+        const item = object(value);
+        return { id: String(item.id ?? ""), text: richText(item.styleContent) || String(item.content ?? "") };
+      });
+      if (!targets.length || targets.some((target) => !target.id) || !items.length || items.some((item) => !item.id)) {
+        throw new Halt("DATA_SHAPE", "旧版匹配题缺少目标或选项");
+      }
+      q.type = "legacy_10";
+      q.answer = targets.map((target) => ({ idx: target.id, val: target.answer }));
+      q.extension = { legacyType: 10, targets, items };
     } else if (type === 22) {
       const items = arrayField(e, "sentItems", "sentenceItems", "items").map((value) => {
         const item = object(value);
@@ -1262,6 +1307,12 @@
     return answers.length === blanks.length ? answers : null;
   }
   function legacyValue(q, record) {
+    if (q.type === "legacy_10") {
+      return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
+        idx,
+        answer: String(object(value).choiceId ?? "")
+      }));
+    }
     if (q.type === "legacy_22") {
       return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
         idx,
@@ -1437,7 +1488,27 @@
         });
       } else if (task.kind === "fill") {
         const items = task.value;
-        if (task.question.type === "legacy_22") {
+        if (task.question.type === "legacy_10") {
+          if (typeof c.drag !== "function") throw new Halt("QUESTION_DOM", "匹配拖拽控件已变化");
+          const pairs = items.map((value) => {
+            const pair = object(value);
+            return { idx: String(pair.idx), answer: String(pair.answer ?? "") };
+          });
+          this.run(unit, () => {
+            const record = object(c.doRecord);
+            if (!record.answer || typeof record.answer !== "object" || Array.isArray(record.answer)) record.answer = {};
+            for (const pair of pairs) {
+              const box = root.querySelector('[class~="' + pair.answer + '"]') ?? document.createElement("div");
+              c.drag({
+                previousContainer: { id: pair.answer, data: {} },
+                container: { id: pair.idx, data: {} },
+                item: { element: { nativeElement: box } }
+              });
+            }
+            if (typeof c.answerChange === "function") c.answerChange();
+            else c.doRecordChange.emit(c.doRecord);
+          });
+        } else if (task.question.type === "legacy_22") {
           if (typeof c.selectOption !== "function") throw new Halt("QUESTION_DOM", "判断题控件已变化");
           const pairs = items.map((value) => {
             const pair = object(value);
@@ -1977,6 +2048,10 @@ ${(q.stem || "").slice(0, 3e3)}
         items: (Array.isArray(ext.items) ? ext.items : []).map((item) => ({ id: String(object(item).id), text: String(object(item).text ?? "") })),
         options: (Array.isArray(ext.options) ? ext.options : []).map((option) => ({ id: String(object(option).id), text: String(object(option).text ?? "") }))
       } : null;
+      const matching = Number(ext.legacyType) === 10 ? {
+        targets: (Array.isArray(ext.targets) ? ext.targets : []).map((target) => ({ id: String(object(target).id), text: String(object(target).text ?? "") })),
+        items: (Array.isArray(ext.items) ? ext.items : []).map((item) => ({ id: String(object(item).id), text: String(object(item).text ?? "") }))
+      } : null;
       const catalog = Number(ext.legacyType) === 11 ? {
         targets: (Array.isArray(ext.targets) ? ext.targets : []).map((target) => ({ id: String(object(target).id), text: String(object(target).text ?? "") })),
         items: (Array.isArray(ext.items) ? ext.items : []).map((item) => ({ id: String(object(item).id), text: String(object(item).text ?? "") }))
@@ -1992,6 +2067,8 @@ ${pageText}
 空位: ${JSON.stringify(blanks)}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
 待分类项: ${JSON.stringify(catalog.items)}` : ""}
+${matching ? `匹配目标: ${JSON.stringify(matching.targets)}
+匹配选项: ${JSON.stringify(matching.items)}` : ""}
 ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ""}
 听力转写: ${transcript || "（无）"}
@@ -2000,6 +2077,7 @@ ${q.type === "fill_base" && object(q.extension).legacyType === 24 ? "拖拽填�
 ${q.type === "fill_base" && object(q.extension).legacyType === 19 ? "对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。" : ""}
 ${Number(ext.legacyType) === 11 ? "每个待分类项必须且只能放入一个目标，全部项目都要分配。" : ""}
 ${Number(ext.legacyType) === 22 ? "判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。" : ""}
+${Number(ext.legacyType) === 10 ? "匹配题每个目标必须且只能选一个匹配项，每个选项只能用一次，全部目标都要分配。" : ""}
 ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。" : ""}
 必须严格回答当前题目。`;
       const result = await answerWithAi(prompt, settings, signal);
@@ -2053,6 +2131,22 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
           throw new Halt("AI_ANSWER", "AI 返回的选项不符合当前选择题");
         }
         return q.type === "choice_multiple" ? selected : selected[0];
+      }
+      if (task.kind === "fill" && Number(object(q.extension).legacyType) === 10) {
+        const ext = object(q.extension);
+        const itemIds = new Set((Array.isArray(ext.items) ? ext.items : []).map((item) => String(object(item).id)));
+        const targets = Array.isArray(task.value) ? task.value.map(object) : [];
+        const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
+        const byId = new Map(fill.map((entry) => [String(entry.idx), String(entry.answer ?? "")]));
+        const seen = /* @__PURE__ */ new Set();
+        const value2 = targets.map((target) => {
+          const idx = String(target.idx), answer = byId.get(idx) ?? "";
+          if (!itemIds.has(answer) || seen.has(answer)) throw new Halt("AI_ANSWER", `AI 返回的匹配项缺失、重复或不属于本题（目标 ${idx}）`);
+          seen.add(answer);
+          return { idx, answer };
+        });
+        if (seen.size !== itemIds.size) throw new Halt("AI_ANSWER", "AI 返回的匹配没有覆盖全部选项");
+        return value2;
       }
       if (task.kind === "fill" && Number(object(q.extension).legacyType) === 22) {
         const ext = object(q.extension);
@@ -2704,7 +2798,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
         </div>
       </section>`;
       this.shadow.append(frame);
-      this.el("version").textContent = false ? "dev" : "0.3.6";
+      this.el("version").textContent = false ? "dev" : "0.3.7";
       this.input("all").checked = this.settings.allLoaded;
       this.input("seconds").value = String(this.settings.recordingSeconds);
       this.el("rolePlayMode").value = this.settings.rolePlayAudioMode;
@@ -2914,7 +3008,7 @@ ${task.kind === "fill" ? "若页面出现词库或选项框，填空答案必须
       } catch {
       }
       return {
-        version: false ? "dev" : "0.3.6",
+        version: false ? "dev" : "0.3.7",
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         route: routePath().replace(/(\/legacy\/course-study-student)\/.*/, "$1/[redacted]"),
         allowedRoute: allowedRoute() || legacyRoute(),

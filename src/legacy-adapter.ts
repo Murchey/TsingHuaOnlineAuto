@@ -136,7 +136,24 @@ export class LegacyAdapter implements Adapter {
       });
     } else if (task.kind === 'fill') {
       const items = task.value as { idx: string; answer?: string; answers?: string[] }[];
-      if (task.question.type === 'legacy_22') {
+      if (task.question.type === 'legacy_10') {
+        if (typeof c.drag !== 'function') throw new Halt('QUESTION_DOM', '匹配拖拽控件已变化');
+        const pairs = items.map(value => {
+          const pair = object(value);
+          return { idx: String(pair.idx), answer: String(pair.answer ?? '') };
+        });
+        this.run(unit, () => {
+          const record = object(c.doRecord);
+          if (!record.answer || typeof record.answer !== 'object' || Array.isArray(record.answer)) record.answer = {};
+          for (const pair of pairs) {
+            const box = root.querySelector<HTMLElement>('[class~="' + pair.answer + '"]') ?? document.createElement('div');
+            c.drag({ previousContainer: { id: pair.answer, data: {} }, container: { id: pair.idx, data: {} },
+              item: { element: { nativeElement: box } } });
+          }
+          if (typeof c.answerChange === 'function') c.answerChange();
+          else c.doRecordChange.emit(c.doRecord);
+        });
+      } else if (task.question.type === 'legacy_22') {
         if (typeof c.selectOption !== 'function') throw new Halt('QUESTION_DOM', '判断题控件已变化');
         const pairs = items.map(value => {
           const pair = object(value);
@@ -664,6 +681,10 @@ ${(q.stem || '').slice(0, 3000)}
       items: (Array.isArray(ext.items) ? ext.items : []).map(item => ({ id: String(object(item).id), text: String(object(item).text ?? '') })),
       options: (Array.isArray(ext.options) ? ext.options : []).map(option => ({ id: String(object(option).id), text: String(object(option).text ?? '') })),
     } : null;
+    const matching = Number(ext.legacyType) === 10 ? {
+      targets: (Array.isArray(ext.targets) ? ext.targets : []).map(target => ({ id: String(object(target).id), text: String(object(target).text ?? '') })),
+      items: (Array.isArray(ext.items) ? ext.items : []).map(item => ({ id: String(object(item).id), text: String(object(item).text ?? '') })),
+    } : null;
     const catalog = Number(ext.legacyType) === 11 ? {
       targets: (Array.isArray(ext.targets) ? ext.targets : []).map(target => ({ id: String(object(target).id), text: String(object(target).text ?? '') })),
       items: (Array.isArray(ext.items) ? ext.items : []).map(item => ({ id: String(object(item).id), text: String(object(item).text ?? '') })),
@@ -681,6 +702,8 @@ ${pageText}
 空位: ${JSON.stringify(blanks)}
 ${catalog ? `分类目标: ${JSON.stringify(catalog.targets)}
 待分类项: ${JSON.stringify(catalog.items)}` : ''}
+${matching ? `匹配目标: ${JSON.stringify(matching.targets)}
+匹配选项: ${JSON.stringify(matching.items)}` : ''}
 ${judge ? `判断题句子: ${JSON.stringify(judge.items)}
 判断选项: ${JSON.stringify(judge.options)}` : ''}
 听力转写: ${transcript || '（无）'}
@@ -689,6 +712,7 @@ ${q.type === 'fill_base' && object(q.extension).legacyType === 24 ? '拖拽填�
 ${q.type === 'fill_base' && object(q.extension).legacyType === 19 ? '对话填空必须逐字摘录听力原文中的片段，保留原词，不要改写或翻译。' : ''}
 ${Number(ext.legacyType) === 11 ? '每个待分类项必须且只能放入一个目标，全部项目都要分配。' : ''}
 ${Number(ext.legacyType) === 22 ? '判断题每条句子必须选择一个判断选项 ID，使用选项的 id 字段；不要返回 T/F/NI 字母或 true/false，除非该字母本身就是选项 id。' : ''}
+${Number(ext.legacyType) === 10 ? '匹配题每个目标必须且只能选一个匹配项，每个选项只能用一次，全部目标都要分配。' : ''}
 ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须从词库中选择原样文本，不要自创词。' : ''}
 必须严格回答当前题目。`;
     const result = await answerWithAi(prompt, settings, signal);
@@ -738,6 +762,22 @@ ${task.kind === 'fill' ? '若页面出现词库或选项框，填空答案必须
         throw new Halt('AI_ANSWER', 'AI 返回的选项不符合当前选择题');
       }
       return q.type === 'choice_multiple' ? selected : selected[0];
+    }
+    if (task.kind === 'fill' && Number(object(q.extension).legacyType) === 10) {
+      const ext = object(q.extension);
+      const itemIds = new Set((Array.isArray(ext.items) ? ext.items : []).map(item => String(object(item).id)));
+      const targets = Array.isArray(task.value) ? task.value.map(object) : [];
+      const fill = Array.isArray(result.fill) ? result.fill.map(object) : [];
+      const byId = new Map(fill.map(entry => [String(entry.idx), String(entry.answer ?? '')]));
+      const seen = new Set<string>();
+      const value = targets.map(target => {
+        const idx = String(target.idx), answer = byId.get(idx) ?? '';
+        if (!itemIds.has(answer) || seen.has(answer)) throw new Halt('AI_ANSWER', `AI 返回的匹配项缺失、重复或不属于本题（目标 ${idx}）`);
+        seen.add(answer);
+        return { idx, answer };
+      });
+      if (seen.size !== itemIds.size) throw new Halt('AI_ANSWER', 'AI 返回的匹配没有覆盖全部选项');
+      return value;
     }
     if (task.kind === 'fill' && Number(object(q.extension).legacyType) === 22) {
       const ext = object(q.extension);

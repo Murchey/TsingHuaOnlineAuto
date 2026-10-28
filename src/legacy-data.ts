@@ -68,6 +68,24 @@ export function legacyQuestion(exercise: unknown): Question {
     }
     q.type = 'legacy_11';
     q.extension = { legacyType: 11, targets, items };
+  } else if (type === 10) {
+    // One-to-one matching: every target receives exactly one dragged item.
+    const targets = arrayField(e, 'drag').map(value => {
+      const target = object(value);
+      const answer = Array.isArray(target.answer) ? target.answer[0] : (target.answer ?? target.choiceId);
+      return { id: String(target.id ?? ''), text: richText(target.styleContent) || String(target.content ?? ''),
+        answer: String(answer ?? '') };
+    });
+    const items = arrayField(e, 'dragged').map(value => {
+      const item = object(value);
+      return { id: String(item.id ?? ''), text: richText(item.styleContent) || String(item.content ?? '') };
+    });
+    if (!targets.length || targets.some(target => !target.id) || !items.length || items.some(item => !item.id)) {
+      throw new Halt('DATA_SHAPE', '旧版匹配题缺少目标或选项');
+    }
+    q.type = 'legacy_10';
+    q.answer = targets.map(target => ({ idx: target.id, val: target.answer }));
+    q.extension = { legacyType: 10, targets, items };
   } else if (type === 22) {
     // Judge (true/false) grid: every statement picks one option column.
     const items = arrayField(e, 'sentItems', 'sentenceItems', 'items').map(value => {
@@ -249,6 +267,11 @@ export function scriptFillAnswers(q: Question): { idx: string; answer: string }[
 }
 
 export function legacyValue(q: Question, record: unknown): unknown {
+  if (q.type === 'legacy_10') {
+    return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
+      idx, answer: String(object(value).choiceId ?? ''),
+    }));
+  }
   if (q.type === 'legacy_22') {
     return Object.entries(object(object(record).answer)).map(([idx, value]) => ({
       idx, answer: String(object(value).id ?? ''),

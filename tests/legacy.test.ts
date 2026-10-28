@@ -78,6 +78,12 @@ const exercise22 = () => ({ id: 'q-22', type: 22, contentString: 'Listen and jud
   options: [{ id: 'opt-t', content: 'True', styleContent: { paragraphs: [{ contentItems: [{ text: 'True' }] }] } },
     { id: 'opt-f', content: 'False', styleContent: { paragraphs: [{ contentItems: [{ text: 'False' }] }] } }] });
 
+const exercise10 = () => ({ id: 'q-10', type: 10, contentString: 'Match each item.',
+  drag: ['Target one', 'Target two'].map((text, index) => ({ id: 't-' + (index + 1), content: text,
+    styleContent: { paragraphs: [{ contentItems: [{ text }] }] } })),
+  dragged: ['Option one', 'Option two'].map((text, index) => ({ id: 'i-' + (index + 1), content: text,
+    styleContent: { paragraphs: [{ contentItems: [{ text }] }] } })) });
+
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); history.replaceState({}, '', path); });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -676,6 +682,59 @@ describe('legacy production route regression', () => {
     const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: false, aiApiKey: 'ai-key' }, signal());
     expect(answerWithAi).toHaveBeenCalledTimes(1);
     expect(value).toEqual([{ idx: 'blank-1', answer: 'ai answer' }]);
+  });
+  it('plans and fills one-to-one legacy type 10 matching questions', async () => {
+    const exercise = exercise10();
+    const data = legacyData({ exercise, submitNum: 0 });
+    const question = data.questionVOList[0];
+    expect(question.type).toBe('legacy_10');
+    const plan = planTasks(data, { allowMissing: true })[0];
+    expect((plan.value as any[]).map(v => v.idx)).toEqual(['t-1', 't-2']);
+    const complete = [{ idx: 't-1', answer: 'i-1' }, { idx: 't-2', answer: 'i-2' }];
+    expect(hasCompleteResponse(question, complete)).toBe(true);
+    expect(hasCompleteResponse(question, [{ idx: 't-1', answer: 'i-1' }, { idx: 't-2', answer: 'i-1' }])).toBe(false);
+    document.body.innerHTML = '<app-course-task-stu><lib-drag-drop-one-exercise-cs-study>' +
+      exercise.dragged.map(i => '<div class="' + i.id + '"></div>').join('') +
+      '</lib-drag-drop-one-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const changes = vi.fn();
+    const leaf: any = { status: 1, exercise, doRecord: { type: 10, answer: {} }, doRecordChange: { emit: changes },
+      drag(event: any) {
+        this.doRecord.answer[event.container.id] = { id: event.container.id, choiceId: event.previousContainer.id, score: 0 };
+        changes(this.doRecord);
+      }, answerChange() { changes(this.doRecord); } };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Match',
+      doRecord: leaf.doRecord, loadDoRecord() {} };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    const task = planTasks(legacyData({ exercise, submitNum: 0 }), { allowMissing: true })[0];
+    vi.mocked(answerWithAi).mockResolvedValue({ fill: [{ idx: 't-1', answer: 'i-1' }, { idx: 't-2', answer: 'i-2' }] });
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(value).toEqual(complete);
+    expect(leaf.doRecord.answer['t-2'].choiceId).toBe('i-2');
+  });
+  it('uses type 10 answers carried by the exercise without asking AI', async () => {
+    const exercise: any = exercise10();
+    exercise.drag[0].answer = 'i-2';
+    exercise.drag[1].answer = 'i-1';
+    const data = legacyData({ exercise, submitNum: 0 });
+    const task = planTasks(data, { allowMissing: true })[0];
+    expect((task.value as any[]).map(v => v.answer)).toEqual(['i-2', 'i-1']);
+    document.body.innerHTML = '<app-course-task-stu><lib-drag-drop-one-exercise-cs-study></lib-drag-drop-one-exercise-cs-study><button>Submit</button></app-course-task-stu>';
+    const root = document.querySelector<HTMLElement>('app-course-task-stu')!;
+    const host = root.firstElementChild as HTMLElement;
+    const leaf: any = { status: 1, exercise, doRecord: { type: 10, answer: {} }, doRecordChange: { emit: vi.fn() },
+      drag(event: any) { this.doRecord.answer[event.container.id] = { id: event.container.id, choiceId: event.previousContainer.id, score: 0 }; } };
+    const c: any = { courseId: 20, pageId: 'page-uuid', userId: 30, role: 4, status: 1, flag: 1,
+      exerciseStatus: 1, data: { isVisiable: 1 }, exercise, pageTitle: 'Match', doRecord: leaf.doRecord, loadDoRecord() {} };
+    const adapter = new LegacyAdapter(() => [{ root, component: c }, { root: host, component: leaf }]);
+    const unit = adapter.discover()[0];
+    vi.mocked(answerWithAi).mockClear();
+    const value = await adapter.fill(unit, task, { ...defaults, aiAnswers: true, aiApiKey: 'ai-key' }, signal());
+    expect(answerWithAi).not.toHaveBeenCalled();
+    expect(value).toEqual([{ idx: 't-1', answer: 'i-2' }, { idx: 't-2', answer: 'i-1' }]);
   });
   it('uses normal read POST and verifies native submission with a fresh server response', async () => {
     const f = fixture(), controller = new Controller(f.adapter, new Store(), async (_, job) => job());
